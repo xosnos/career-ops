@@ -40,7 +40,7 @@ truth throughout — Notion is an opt-in mirror, not a replacement backend.
    | `Company` | Text (rich text) | |
    | `Status` | Select | New option values are created automatically on first write if they don't exist yet, as long as Update content is on |
    | `Score` | Number | |
-   | `URL` | URL | Only populated if *you* fill it in manually — `export` never sets it. `search` only returns rows that have this set |
+   | `URL` | URL | Automatically populated from the job posting URL (from the tracker row or linked evaluation report) |
 
 4. Share the **Career Ops page** (not just the database) with your integration:
    page **•••** menu → **Connections** → add your integration by name.
@@ -87,12 +87,8 @@ node plugins.mjs run notion search "<query>"
 
 ## Scope, honestly
 
-- `export` mirrors **four fields only**: Role, Company, Status, Score. It never sets
-  `URL`, and it never touches notes, salary, or follow-up data — those stay
-  Notion-only if you add them there.
-- `search` is a separate lead-discovery path, not a sync-back of exported rows —
-  rows `export` creates are deliberately excluded from `search` results (they have no
-  `URL`), so there's no accidental round-trip loop.
+- `export` mirrors **five fields**: Role, Company, Status, Score, and URL (resolved from the tracker row or the linked report). It never touches notes, salary, or follow-up data — those stay Notion-only if you add them there.
+- `search` is a separate lead-discovery path for untracked leads added directly in Notion — rows carrying a tracker status are excluded to prevent duplicate loops.
 - Once rows exist in the database, Notion's native views (Board grouped by Status,
   Calendar, filters/sorts) work for free on top — those are just views over whatever
   properties exist, independent of what the plugin writes.

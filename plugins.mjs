@@ -185,7 +185,7 @@ async function cmdRun(args) {
     // row), so the default 15s hook timeout only covers a handful of rows.
     // Scale with tracker size so a growing applications.md doesn't age out.
     const rowCount = snapshot.applications.length;
-    const timeoutMs = Math.min(120_000, Math.max(15_000, rowCount * 3_000));
+    const timeoutMs = Math.min(600_000, Math.max(15_000, rowCount * 3_000));
     const results = filterResultsForId(await runHook('export', snapshot, { root: ROOT, dataRoot: DATA_ROOT, dryRun, timeoutMs, pluginId: id }), id);
     for (const r of results) {
       if (r.ok) console.log(`${r.id} export: pushed ${r.result?.pushed ?? 0} record(s).`);

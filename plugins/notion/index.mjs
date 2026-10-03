@@ -21,7 +21,11 @@
 //   node plugins.mjs run notion export            # mirror tracker → Notion
 //   node plugins.mjs run notion search "platform" # read matching records → pipeline
 
-import { createNotionClient, rich, canonicalStatus } from './_notion.mjs';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { getCareerOpsRoot } from '../../path-resolver.mjs';
+import { findCaptureForReport } from '../../jd-capture.mjs';
+import { createNotionClient, rich, canonicalStatus, plain } from './_notion.mjs';
 
 function clientFromCtx(ctx) {
   return createNotionClient({
@@ -53,8 +57,93 @@ export function parseScore(s) {
   return m ? parseFloat(m[1]) : NaN;
 }
 
+/**
+ * Extract the job URL for a tracker row.
+ * Checks row.url first; if absent, reads the report file linked in row.report
+ * and extracts the `**URL:**` header.
+ *
+ * @param {Record<string, string>} row - Tracker row from snapshot.
+ * @param {string} [dataRoot] - Career-ops data directory.
+ * @returns {string} Clean HTTP(S) URL or empty string.
+ */
+export function resolveRowUrl(row, dataRoot = getCareerOpsRoot()) {
+  if (row?.url && /^https?:\/\//i.test(row.url.trim())) {
+    return row.url.trim();
+  }
+  const reportCell = (row?.report || '').trim();
+  if (!reportCell) return '';
+  const linkMatch = reportCell.match(/\]\(([^)]+)\)/);
+  const relPath = linkMatch ? linkMatch[1].trim() : reportCell;
+  const cleanPath = relPath.replace(/^(\.\.\/)+/, '').replace(/^\.\//, '');
+  const candidates = [
+    join(dataRoot, cleanPath),
+    join(dataRoot, 'reports', cleanPath.replace(/^reports\//, '')),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try {
+        const text = readFileSync(p, 'utf8');
+        const m = text.match(/\*\*URL:\*\*[ \t]*(\S+)/);
+        if (m) {
+          const raw = m[1].replace(/^<|>$/g, '').replace(/[),.;]+$/, '');
+          if (/^https?:\/\//i.test(raw)) return raw;
+        }
+      } catch {}
+    }
+  }
+  return '';
+}
+
+/**
+ * Resolve evaluation report markdown and archived JD for a tracker row.
+ *
+ * @param {Record<string, string>} row
+ * @param {string} [dataRoot]
+ * @returns {string} Combined markdown for the Notion page body.
+ */
+export function resolvePageMarkdown(row, dataRoot = getCareerOpsRoot()) {
+  let reportText = '';
+  const reportCell = (row?.report || '').trim();
+  if (reportCell) {
+    const linkMatch = reportCell.match(/\]\(([^)]+)\)/);
+    const relPath = linkMatch ? linkMatch[1].trim() : reportCell;
+    const cleanPath = relPath.replace(/^(\.\.\/)+/, '').replace(/^\.\//, '');
+    const candidates = [
+      join(dataRoot, cleanPath),
+      join(dataRoot, 'reports', cleanPath.replace(/^reports\//, '')),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        try {
+          reportText = readFileSync(p, 'utf8');
+          break;
+        } catch {}
+      }
+    }
+  }
+
+  // If JD is not already embedded in the report, check jds/
+  const hasEmbeddedJd = /##\s*Job\s*Description/i.test(reportText);
+  if (!hasEmbeddedJd && row?.['#']) {
+    try {
+      const cap = findCaptureForReport(join(dataRoot, 'jds'), row['#']);
+      if (cap?.path && existsSync(cap.path)) {
+        const jdContent = readFileSync(cap.path, 'utf8');
+        if (jdContent && jdContent.trim()) {
+          reportText = (reportText ? reportText.trim() + '\n\n---\n\n' : '') +
+            '## Job Description (archived verbatim)\n\n' + jdContent.trim();
+        }
+      }
+    } catch {}
+  }
+
+  return reportText.trim();
+}
+
 export default {
   parseScore,
+  resolveRowUrl,
+  resolvePageMarkdown,
 
   /**
    * export: upsert each tracker row into the user's Notion Applications DB.
@@ -67,6 +156,18 @@ export default {
     if (rows.length === 0) return { pushed: 0 };
     const client = clientFromCtx(ctx);
     const apps = await applicationsDb(client);
+    const dataRoot = getCareerOpsRoot();
+
+    // Cache existing database records once upfront to avoid 1 query per row
+    let existingMap = new Map();
+    if (!ctx?.dryRun) {
+      const existingRaw = await client.queryDB(apps);
+      for (const r of existingRaw) {
+        const c = plain(r.properties?.Company).trim().toLowerCase();
+        const ro = plain(r.properties?.Role).trim().toLowerCase();
+        if (c && ro) existingMap.set(`${c} / ${ro}`, r.id);
+      }
+    }
 
     let pushed = 0;
     for (const row of rows) {
@@ -79,14 +180,31 @@ export default {
       if (status) props.Status = { select: { name: status } };
       const score = parseScore(row.score);
       if (Number.isFinite(score)) props.Score = { number: score };
+      const url = resolveRowUrl(row, dataRoot);
+      if (url) props.URL = { url };
+      const markdown = resolvePageMarkdown(row, dataRoot);
 
-      if (ctx?.dryRun) { ctx.log(`would push: ${company} — ${role}`); pushed++; continue; }
+      if (ctx?.dryRun) {
+        ctx.log(`would push: ${company} — ${role}${url ? ` (${url})` : ''}${markdown ? ' [with report body]' : ''}`);
+        pushed++;
+        continue;
+      }
 
       // Upsert: update an existing company+role record, else create one.
-      const dupes = (await client.findRecords(apps, `${company} / ${role}`))
-        .filter((h) => h.company.toLowerCase() === company.toLowerCase() && h.role.toLowerCase() === role.toLowerCase());
-      if (dupes.length) await client.api(`pages/${dupes[0].id}`, 'PATCH', { properties: props });
-      else await client.createPage(apps, props);
+      const key = `${company.toLowerCase()} / ${role.toLowerCase()}`;
+      const existingId = existingMap.get(key);
+      if (existingId) {
+        if (markdown) {
+          await client.api(`pages/${existingId}`, 'PATCH', { in_trash: true });
+          const created = await client.createPage(apps, props, markdown);
+          if (created?.id) existingMap.set(key, created.id);
+        } else {
+          await client.api(`pages/${existingId}`, 'PATCH', { properties: props });
+        }
+      } else {
+        const created = await client.createPage(apps, props, markdown || undefined);
+        if (created?.id) existingMap.set(key, created.id);
+      }
       pushed++;
     }
     return { pushed };
@@ -95,10 +213,8 @@ export default {
   /**
    * search: return Notion records matching a query as Job[]. Only records that
    * carry a job posting in a `URL` property are returned (e.g. a postings DB, or
-   * leads you added in Notion). Note: `export` mirrors the tracker (company/role/
-   * status/score) and does NOT set a job URL, so export-created rows are not
-   * round-tripped by search — that's intentional, they already live in your
-   * tracker. The engine writes any results to the pipeline canonically.
+   * leads you added in Notion). Untracked leads (without a status) are returned;
+   * records already carrying a tracker status are excluded to prevent duplicate loops.
    * @param {string} query
    * @param {any} ctx
    */
@@ -107,7 +223,7 @@ export default {
     const apps = await applicationsDb(client);
     const hits = await client.findRecords(apps, query);
     return hits
-      .filter((h) => h.jobUrl && /^https?:\/\//i.test(h.jobUrl))
+      .filter((h) => h.jobUrl && /^https?:\/\//i.test(h.jobUrl) && !h.status)
       .map((h) => ({ title: h.role || 'Notion record', url: h.jobUrl, company: h.company || '', location: '' }));
   },
 };

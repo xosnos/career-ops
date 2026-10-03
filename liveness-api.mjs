@@ -103,10 +103,21 @@ const ATS_PROVIDERS = [
   {
     id: 'greenhouse',
     // boards.greenhouse.io/{board}/jobs/{id} · job-boards[.eu].greenhouse.io/{board}/jobs/{id}
+    // Also matches embedded Greenhouse jobs via board and gh_jid query params (e.g. coreweave.com)
     match(u) {
-      if (atsVendorOf(u.href) !== 'greenhouse') return null;
-      const m = u.pathname.match(/^\/([^/]+)\/jobs\/(\d+)\/?$/);
-      return m ? { board: m[1], id: m[2] } : null;
+      if (atsVendorOf(u.href) === 'greenhouse') {
+        const m = u.pathname.match(/^\/([^/]+)\/jobs\/(\d+)\/?$/);
+        if (m) return { board: m[1], id: m[2] };
+      }
+      const ghJid = u.searchParams.get('gh_jid');
+      if (ghJid && /^\d+$/.test(ghJid)) {
+        const board = u.searchParams.get('board') ||
+          (u.hostname.includes('wayve') ? 'wayve' :
+           u.hostname.includes('sumup') ? 'sumup' :
+           u.hostname.includes('boomi') ? 'boomilp' : null);
+        if (board) return { board, id: ghJid };
+      }
+      return null;
     },
     api: ({ board, id }) => `https://boards-api.greenhouse.io/v1/boards/${board}/jobs/${id}`,
   },
