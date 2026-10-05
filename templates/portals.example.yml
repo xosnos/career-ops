@@ -55,6 +55,22 @@
 # scan_history:
 #   dedup_include_location: true
 
+# -- Language-aware duplicate roles (optional, opt-in) --
+# An employer can publish one requisition in more than one language (for
+# example German and English), with the same title and location in each. By
+# default those are ONE role and the scan keeps whichever version the ATS
+# returned first.
+#
+# Set dedup_include_language: true to keep them apart when the ATS reports each
+# posting's language. Turn it on when you only apply to postings written in some
+# languages and discard the rest (for example, skip every JD written in German):
+# otherwise the version the scan kept may be the one you throw away.
+# Regional variants count as one language (en-GB equals en), and a posting whose
+# language the ATS doesn't report is compared as before.
+#
+# scan_history:
+#   dedup_include_language: true
+
 # -- Interamt.de searches (optional, German public sector) --
 # Read by scan-interamt.mjs (`npm run scan:interamt`), a separate Playwright
 # scanner for Interamt.de, a portal for German federal, state, and municipal
@@ -623,6 +639,40 @@ title_filter:
 #       - "Program Administrator"
 #       - "Registrar"
 #       - "Student Services"
+
+# -- Declared-field whitelists (optional, scan.mjs) --
+# title_filter judges a posting by its TITLE. Some boards publish a better
+# discriminator as a field of its own — an occupation code, a department —
+# which no title list can stand in for: one title spans several occupations,
+# and one occupation is advertised under countless titles.
+#
+# field_filters holds one whitelist per field, in the same keyword language as
+# title_filter (plain substring, `word:`, `stem:`). A target opts in with
+# `filter_on`; a target without it gates on title exactly as before.
+#
+#   filter_on: noc             # judge this target by `noc` instead of title
+#   filter_on: [title, noc]    # both must match (AND)
+#
+# The provider has to emit the field: e.g. a local_parser script adding
+# "noc": "22221" to each job object it prints. A posting without the field
+# PASSES rather than being dropped, and is counted as "Passed, field absent" in
+# the scan summary; a target that never supplies the field at all gets an
+# end-of-run warning that its whitelist is effectively off. `title` cannot be
+# a key here — title keywords belong in title_filter above.
+#
+# field_filters:
+#   noc:
+#     positive: ["stem:22", "stem:13"]   # occupation codes starting 22 or 13
+#
+# and, as an entry under the tracked_companies: key further down:
+#   - name: Example Occupation-Coded Board
+#     careers_url: https://example.com/jobs
+#     scan_method: local_parser
+#     filter_on: noc
+#     parser:
+#       command: node
+#       script: local/example-board-jobs.js
+#       format: jobs-json-v1
 
 # -- Search queries --
 # Each query triggers a WebSearch. Use site: to filter by portal.
@@ -1368,7 +1418,7 @@ search_queries:
 #   provider: dassault                    # optional — 3ds.com host also auto-detects
 #   enabled: true                         # ~445 English postings (zero-token XML)
 #
-# - name: Deutsche Bahn                   # single-company; db.jobs Avature front
+# - name: Deutsche Bahn                   # single-company; db.jobs search front
 #   careers_url: https://db.jobs          # auto-detects; SSR search, paginated over HTTP
 #   provider: deutschebahn                # optional — db.jobs host also auto-detects
 #   enabled: true
@@ -1677,6 +1727,35 @@ search_queries:
 # - name: Python.org Jobs                 # Python Software Foundation jobs (public RSS feed)
 #   provider: pythonorg
 #   careers_url: https://www.python.org/jobs/
+#   enabled: true
+#
+# Startup Jobs: global startup/scale-up jobs (public RSS feed). Each query
+# returns only the ~50 most recent postings, so cover a search with several
+# narrow entries rather than one broad one: one per role slug, plus a
+# `workplace: remote` variant (for a broad slug the unscoped entry fills up
+# within hours, while the remote one stays under the cap longer).
+#   role: slug = last segment of a https://startup.jobs/roles/<slug> page;
+#     full list: bare /roles/<slug> entries in
+#     https://cdn.startup.jobs/sitemaps/startupjobs/roles.xml.gz
+#   workplace: optional; "remote" is the only accepted value, anything else → HTTP 404
+#
+# - name: Startup Jobs — Platform Engineer
+#   provider: startup-jobs
+#   startup_jobs:
+#     role: platform-engineer
+#   enabled: true
+#
+# - name: Startup Jobs — Platform Engineer (remote)
+#   provider: startup-jobs
+#   startup_jobs:
+#     role: platform-engineer
+#     workplace: remote
+#   enabled: true
+#
+# - name: Startup Jobs — Site Reliability Engineer
+#   provider: startup-jobs
+#   startup_jobs:
+#     role: site-reliability-engineer
 #   enabled: true
 #
 # - name: Welcome to the Jungle           # global board via WTTJ's public Algolia index

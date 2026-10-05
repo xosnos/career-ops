@@ -30,7 +30,7 @@ import { LEGACY_COLMAP, TSV_REQUIRED_FIELDS, detectColumns, isHeaderRow, resolve
 // for the same reason normalizeCompany lives in tracker-utils: a second private
 // list is how company identity drifts between scripts (#2445, #3665).
 import { LEGAL_SUFFIXES, GENERIC_DESCRIPTORS } from './invite-match.mjs';
-import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell, loadCanonicalStates } from './tracker-utils.mjs';
+import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell, loadCanonicalStates, findDeadReportLink } from './tracker-utils.mjs';
 // Canonical posting-URL key. Kept in its own module so scan.mjs / scan-history
 // can adopt the same key later without the definitions drifting.
 import { normalizeUrl, isAggregatorUrl, aggregatorPostingId } from './url-key.mjs';
@@ -1375,6 +1375,7 @@ console.log(`📊 Existing: ${existingApps.length} entries, max #${maxNum}`);
 let added = 0;
 let updated = 0;
 let skipped = 0;
+let missingReports = 0;
 const pdfIndex = loadPdfIndex();
 const pdfSynced = syncPdfFlags(existingApps, appLines, pdfIndex);
 updated += pdfSynced;
@@ -1500,6 +1501,27 @@ for (const file of tsvFiles) {
     }
     skipped++;
     continue;
+  }
+
+  // #4748: the report cell is copied into the tracker as-is, so a link to a
+  // report that is not on disk would otherwise go in silently and only surface
+  // later in verify-pipeline. Warn, but still merge: the application record is
+  // the user's data and must not be lost or rewritten because a report is
+  // missing. Cells with no link (—, N/A, empty) are the documented "no report"
+  // convention and are not flagged. Checked against the same two bases
+  // verify-pipeline's Check 3 uses (the tracker's own directory, then the data
+  // root for legacy root-relative links), so a link warned about here is
+  // exactly one verify-pipeline would flag later. resolveReportPath() is NOT
+  // used: it strips leading `../` and so can accept a link verify-pipeline
+  // rejects (e.g. `../../stray.md`).
+  // The rule itself lives in tracker-utils.mjs (findDeadReportLink), shared with
+  // verify-pipeline's Check 3 and fix-report-links.mjs: a directory (e.g. a link
+  // to `reports/`) is not a report, so a regular file is required.
+  const deadLink = findDeadReportLink(addition.report, TRACKER_DIR, DATA_ROOT);
+  if (deadLink !== null) {
+    const linked = deadLink.trim();
+    console.warn(`⚠️  ${file}: ${addition.company} — ${addition.role}: report link "${linked}" does not resolve to a file (checked from ${TRACKER_DIR} and ${DATA_ROOT}) — the row is not rewritten; verify-pipeline will flag it until the report exists`);
+    missingReports++;
   }
 
   let duplicate = null;
@@ -1979,6 +2001,7 @@ if (!DRY_RUN) {
 }
 
 console.log(`\n📊 Summary: +${added} added, 🔄${updated} updated, ⏭️${skipped} skipped${failedAdditions.length ? `, ❌${failedAdditions.length} NOT merged` : ''}`);
+if (missingReports > 0) console.log(`⚠️  ${missingReports} row(s) link to a report that is not on disk (see warnings above)`);
 if (DRY_RUN) console.log('(dry-run — no changes written)');
 trackerLock.release();
 
