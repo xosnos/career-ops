@@ -682,6 +682,7 @@ function buildRow(o) {
   put('via', cell(o.via) || '—');
   put('role', cell(o.role));
   put('location', cell(o.location) || '—');
+  put('pay', cell(o.pay) || '—');
   put('score', o.score);
   put('status', o.status);
   put('pdf', o.pdf);
@@ -712,6 +713,7 @@ function buildHeaderRows() {
   if (COLMAP.via != null) labels.push('Via');
   labels.push('Role');
   if (COLMAP.location != null) labels.push('Location');
+  if (COLMAP.pay != null) labels.push('Pay Range');
   labels.push('Score', 'Status', 'PDF', 'Report', 'Notes');
   return {
     header: `| ${labels.join(' | ')} |`,
@@ -742,6 +744,7 @@ function parseAppLine(line) {
     via: COLMAP.via != null ? parts[COLMAP.via] : '',
     role: parts[COLMAP.role],
     location: COLMAP.location != null ? parts[COLMAP.location] : '',
+    pay: COLMAP.pay != null ? parts[COLMAP.pay] : '',
     score: parts[COLMAP.score],
     status: parts[COLMAP.status],
     // Null-safe: a header without dedicated PDF/Report columns leaves those
@@ -2011,6 +2014,19 @@ if (!DRY_RUN) {
     execFileSync(process.execPath, [join(CAREER_OPS_CODE_ROOT, 'sync-pdf-flags.mjs')], { stdio: 'inherit' });
   } catch (e) {
     console.warn(`⚠️  Failed to sync PDF flags: ${e.message}`);
+  }
+}
+
+// Sync new/updated evaluations to Notion if Notion plugin is enabled
+if (!DRY_RUN && (added > 0 || updated > 0)) {
+  try {
+    const { syncNotionAdditions } = await import('./plugins/notion/sync.mjs');
+    const notionRes = await syncNotionAdditions(DATA_ROOT);
+    if (notionRes?.synced && notionRes.pushed > 0) {
+      console.log(`📝 Notion: synced ${notionRes.pushed} record(s) to Applications database.`);
+    }
+  } catch (e) {
+    // Fail-open: never block merge
   }
 }
 

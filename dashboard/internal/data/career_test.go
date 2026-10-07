@@ -293,6 +293,52 @@ func TestParseApplicationsMapsColumnsByHeader(t *testing.T) {
 	if a.ReportNumber != "1" {
 		t.Errorf("ReportNumber = %q, want \"1\"", a.ReportNumber)
 	}
+	if a.WorkMode != "Remote" {
+		t.Errorf("WorkMode = %q, want \"Remote\"", a.WorkMode)
+	}
+}
+
+func TestParseApplicationsMapsLocationAndPayColumns(t *testing.T) {
+	tracker := `# Applications Tracker
+
+| # | Date | Company | Role | Location | Pay Range | Score | Status | PDF | Report | Notes |
+|---|------|---------|------|----------|-----------|-------|--------|-----|--------|-------|
+| 1 | 2026-06-01 | Acme | SWE | San Francisco, CA (Hybrid) | $160,000–$200,000 | 4.5/5 | Applied | ✅ | [1](reports/001.md) | hot lead |
+| 2 | 2026-06-02 | Beta | SRE | Remote - US | $180,000 to $220,000 USD | 4.2/5 | Evaluated | ❌ | [2](reports/002.md) | — |
+`
+	tempDir, _ := writeTracker(t, tracker)
+	apps := ParseApplications(tempDir)
+	if len(apps) != 2 {
+		t.Fatalf("expected 2 applications, got %d", len(apps))
+	}
+	if apps[0].Location != "San Francisco, CA" {
+		t.Errorf("apps[0].Location = %q, want \"San Francisco, CA\"", apps[0].Location)
+	}
+	if apps[0].WorkMode != "Hybrid" {
+		t.Errorf("apps[0].WorkMode = %q, want \"Hybrid\"", apps[0].WorkMode)
+	}
+	if apps[0].PayRange != "$160K–$200K" {
+		t.Errorf("apps[0].PayRange = %q, want \"$160K–$200K\"", apps[0].PayRange)
+	}
+	if apps[0].PayMax != 200000 {
+		t.Errorf("apps[0].PayMax = %f, want 200000", apps[0].PayMax)
+	}
+	if apps[0].PaySource != "POSTED" {
+		t.Errorf("apps[0].PaySource = %q, want \"POSTED\"", apps[0].PaySource)
+	}
+
+	if apps[1].Location != "" {
+		t.Errorf("apps[1].Location = %q, want empty", apps[1].Location)
+	}
+	if apps[1].WorkMode != "Remote" {
+		t.Errorf("apps[1].WorkMode = %q, want \"Remote\"", apps[1].WorkMode)
+	}
+	if apps[1].PayRange != "$180K–$220K" {
+		t.Errorf("apps[1].PayRange = %q, want \"$180K–$220K\"", apps[1].PayRange)
+	}
+	if apps[1].PayMax != 220000 {
+		t.Errorf("apps[1].PayMax = %f, want 220000", apps[1].PayMax)
+	}
 }
 
 func TestParseApplicationsUsesTrackerURLBeforeLegacyEnrichment(t *testing.T) {

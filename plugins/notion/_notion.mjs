@@ -102,10 +102,12 @@ export function createNotionClient({ token, parent, fetch: fetchFn = globalThis.
     return out;
   }
 
-  async function queryDB(dataSourceId) {
+  async function queryDB(dataSourceId, opts = {}) {
     let cursor, all = [];
     do {
-      const j = await api(`data_sources/${dataSourceId}/query`, 'POST', { page_size: 100, start_cursor: cursor });
+      const body = { page_size: 100, ...opts };
+      if (cursor) body.start_cursor = cursor;
+      const j = await api(`data_sources/${dataSourceId}/query`, 'POST', body);
       all.push(...j.results);
       cursor = j.has_more ? j.next_cursor : null;
     } while (cursor);

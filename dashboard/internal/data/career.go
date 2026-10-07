@@ -23,6 +23,9 @@ var (
 	reTlDrColon      = regexp.MustCompile(`(?i)\*\*TL;DR:\*\*\s*(.+)`)
 	reRemote         = regexp.MustCompile(`(?i)\*\*Remote\*\*\s*\|\s*(.+)`)
 	reComp           = regexp.MustCompile(`(?i)\*\*Comp\*\*\s*\|\s*(.+)`)
+	reCompYAML       = regexp.MustCompile(`(?mi)^advertised_comp:\s*"?([^"\n]+)"?\s*$`)
+	reRemotePolicy   = regexp.MustCompile(`(?i)\*\*Remote(?:\s+Policy)?\*\*\s*\|\s*(.+)`)
+	reParenWorkMode  = regexp.MustCompile(`\s*\([^)]*\)`)
 	reArchetypeColon = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype):\*\*\s*(.+)`)
 	reArchetypeYAML  = regexp.MustCompile(`(?m)^archetype:\s*"?([^"\n]+)"?\s*$`)
 	reReportURL      = regexp.MustCompile(`(?m)^\*\*URL:\*\*\s*(https?://\S+)`)
@@ -172,6 +175,10 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 
 		// Lift location / work mode / pay / last-contact out of the notes free-text
 		deriveNoteFields(&app)
+
+		// Explicit tracker columns override / complement note-derived fields
+		applyTrackerLocation(&app, at("location"))
+		applyTrackerPay(&app, at("pay"))
 
 		apps = append(apps, app)
 	}
@@ -602,9 +609,13 @@ func LoadReportSummary(careerOpsPath, reportPath string) (archetype, tldr, remot
 
 	if m := reRemote.FindStringSubmatch(text); m != nil {
 		remote = cleanTableCell(m[1])
+	} else if m := reRemotePolicy.FindStringSubmatch(text); m != nil {
+		remote = cleanTableCell(m[1])
 	}
 
 	if m := reComp.FindStringSubmatch(text); m != nil {
+		comp = cleanTableCell(m[1])
+	} else if m := reCompYAML.FindStringSubmatch(text); m != nil {
 		comp = cleanTableCell(m[1])
 	}
 
@@ -651,7 +662,9 @@ var trackerHeaderAliases = map[string]string{
 	"firma": "company", "virksomhed": "company", "perusahaan": "company",
 	"via": "via", "role": "role", "puesto": "role",
 	"rolle": "role", "rola": "role", "vaga": "role",
-	"location": "location", "ort": "location", "score": "score", "status": "status",
+	"location": "location", "ort": "location",
+	"pay": "pay", "pay range": "pay", "salary": "pay", "salario": "pay", "comp": "pay", "compensation": "pay",
+	"score": "score", "status": "status",
 	"pdf": "pdf", "materials": "pdf", "report": "report",
 	"apply link": "applylink", "apply": "applylink",
 	"follow-up": "followup", "follow up": "followup", "followup": "followup",
@@ -1215,4 +1228,122 @@ func SaveAnonymousStat(careerOpsPath string, role string, weeks int) error {
 	dateStr := time.Now().Format("2006-01-02")
 	_, err = f.WriteString(fmt.Sprintf("%s\t%s\t%d\n", dateStr, role, weeks))
 	return err
+}
+
+func applyTrackerLocation(app *model.CareerApplication, rawLoc string) {
+	rawLoc = strings.TrimSpace(rawLoc)
+	if rawLoc == "" || rawLoc == "—" || rawLoc == "-" || rawLoc == "N/A" {
+		return
+	}
+	lower := strings.ToLower(rawLoc)
+	mode := ""
+	switch {
+	case strings.Contains(lower, "hybrid"):
+		mode = "Hybrid"
+	case strings.Contains(lower, "remote") && (strings.Contains(lower, "flex") || strings.Contains(lower, "remote-first") || strings.Contains(lower, "remote first")):
+		mode = "RemoteFlex"
+	case strings.Contains(lower, "remote"):
+		mode = "Remote"
+	case strings.Contains(lower, "onsite") || strings.Contains(lower, "on-site") || strings.Contains(lower, "in-office"):
+		mode = "Full"
+	}
+	if mode != "" {
+		app.WorkMode = mode
+	}
+
+	clean := strings.TrimSpace(reParenWorkMode.ReplaceAllString(rawLoc, ""))
+	cleanLower := strings.ToLower(clean)
+	if strings.HasPrefix(cleanLower, "remote") {
+		if app.WorkMode == "" {
+			app.WorkMode = "Remote"
+		}
+		return
+	}
+	if clean != "" {
+		app.Location = clean
+		if app.WorkMode == "" {
+			app.WorkMode = "Full"
+		}
+	}
+}
+
+func fmtK(val float64) string {
+	if val >= 1000 {
+		k := val / 1000
+		if k == float64(int(k)) {
+			return fmt.Sprintf("%dK", int(k))
+		}
+		return fmt.Sprintf("%.1fK", k)
+	}
+	return fmt.Sprintf("%d", int(val))
+}
+
+func formatPayCompact(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "—" || raw == "-" || raw == "N/A" {
+		return ""
+	}
+	matches := reMoneyPart.FindAllStringSubmatch(raw, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	hasKHint := strings.Contains(strings.ToLower(raw), "k")
+	var nums []float64
+	for _, m := range matches {
+		clean := strings.ReplaceAll(m[1], ",", "")
+		v, err := strconv.ParseFloat(clean, 64)
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(m[2]) {
+		case "k":
+			v *= 1000
+		case "m":
+			v *= 1000000
+		case "b":
+			v *= 1000000000
+		default:
+			if v < 1000 && hasKHint {
+				v *= 1000
+			}
+		}
+		if v >= 10000 {
+			nums = append(nums, v)
+		}
+		if len(nums) == 2 {
+			break
+		}
+	}
+	if len(nums) == 2 {
+		return fmt.Sprintf("$%s–$%s", fmtK(nums[0]), fmtK(nums[1]))
+	}
+	if len(nums) == 1 {
+		return fmt.Sprintf("$%s", fmtK(nums[0]))
+	}
+	return ""
+}
+
+func applyTrackerPay(app *model.CareerApplication, rawPay string) {
+	rawPay = strings.TrimSpace(rawPay)
+	if rawPay == "" || rawPay == "—" || rawPay == "-" || rawPay == "N/A" {
+		return
+	}
+	ceiling := payCeiling(rawPay)
+	if ceiling > 0 {
+		app.PayMax = ceiling
+	}
+	compact := formatPayCompact(rawPay)
+	if compact != "" {
+		app.PayRange = compact
+	} else if app.PayRange == "" {
+		app.PayRange = rawPay
+	}
+	if app.PayRange != "" {
+		lower := strings.ToLower(rawPay)
+		if strings.Contains(lower, "(posted") || (!strings.Contains(lower, "est") && !strings.Contains(lower, "market")) {
+			app.PaySource = "POSTED"
+		} else {
+			app.PaySource = "est"
+		}
+	}
 }

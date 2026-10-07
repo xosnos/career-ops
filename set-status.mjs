@@ -912,6 +912,26 @@ if (statusChanged && newStatus === 'Interview' && !flags.dryRun) {
   }
 }
 
+// ── Notion sync on status change (opt-in plugin) ───────────────────
+let notionSynced = null;
+if (statusChanged && !flags.dryRun) {
+  try {
+    const { syncNotionStatus } = await import('./plugins/notion/sync.mjs');
+    const workspaceRoot = resolveWorkspaceRoot(APPS_FILE);
+    notionSynced = await syncNotionStatus({
+      company: target.company,
+      role: target.role,
+      status: newStatus,
+      score: target.score,
+      url: target.url,
+      report: target.report,
+      dataRoot: workspaceRoot,
+    });
+  } catch (err) {
+    notionSynced = { synced: false, error: err.message };
+  }
+}
+
 // ── report ───────────────────────────────────────────────────────
 
 const result = {
@@ -934,6 +954,7 @@ const result = {
   ...(followupSeeded ? { followupSeeded } : {}),
   ...(jdArchiveTriggered ? { jdArchiveTriggered } : {}),
   ...(statusChanged && !flags.dryRun ? { statusLogged } : {}),
+  ...(notionSynced?.synced ? { notionSynced } : {}),
   tracker: APPS_FILE,
 };
 
@@ -943,6 +964,9 @@ if (flags.json) {
 } else {
   const verb = flags.dryRun ? 'would set' : changed ? 'set' : 'already';
   console.log(`✅ #${target.num} ${target.company} — ${target.role}: ${verb} ${oldStatus} → ${newStatus}${note ? ` (note: ${note})` : ''}`);
+  if (notionSynced?.synced && notionSynced?.action === 'updated') {
+    console.log(`📝 Notion: updated ${target.company} status → ${newStatus}`);
+  }
   // Only when seeding did NOT happen. The advisory predates the seeding above
   // and asked the user to do by hand what now runs for them; leaving it
   // unconditional would read as a contradiction right under "Follow-up seeded".
