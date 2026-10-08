@@ -978,6 +978,7 @@ function parseHeadedAddition(lines, filename) {
     // also brings the headerless form's `via=` tag along.
     via: optional('via').replace(/^via=/i, '').trim(),
     location: optional('location'),
+    pay: optional('pay'),
     url: optional('url'),
   };
 }
@@ -1854,6 +1855,7 @@ for (const file of tsvFiles) {
       role: (reportNumMatched || dupReason === 'url') ? addition.role : duplicate.role,
       via: addition.via || duplicate.via || '—',
       location: addition.location || duplicate.location || '—',
+      pay: addition.pay || duplicate.pay || '—',
       score: addition.score, status: duplicate.status, pdf,
       report: addition.report,
       notes: mergeNotes(duplicate.notes, addition, oldScore, newScore, supersededNote),
@@ -1916,6 +1918,7 @@ for (const file of tsvFiles) {
       num: entryNum, date: addition.date, company: addition.company, role: addition.role,
       via: addition.via || '—',
       location: addition.location || '—',
+      pay: addition.pay || '—',
       score: addition.score, status: addition.status, pdf,
       report: addition.report, notes: addition.notes,
       // Write the key on the way in. Backfill is the one-time EXPAND phase for
