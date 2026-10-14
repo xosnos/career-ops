@@ -2330,6 +2330,22 @@ export async function mergeTracker(options = {}) {
       }
     }
 
+    // Sync new/updated evaluations to Notion if Notion plugin is enabled
+    if (!DRY_RUN && (added > 0 || updated > 0)) {
+      try {
+        const { syncNotionAdditions } = await import('./plugins/notion/sync.mjs');
+        const notionRes = await syncNotionAdditions(DATA_ROOT, { trackerPath: APPS_FILE });
+        if (notionRes?.synced && notionRes.pushed > 0) {
+          console.log(`📝 Notion: synced ${notionRes.pushed} record(s) to Applications database.`);
+        } else if (notionRes?.error) {
+          console.warn(`⚠️  Notion sync failed (merge itself succeeded): ${notionRes.error}`);
+        }
+      } catch (e) {
+        // Fail-open: never block merge
+        console.warn(`⚠️  Notion sync failed (merge itself succeeded): ${e.message}`);
+      }
+    }
+
     // Optional verify
     if (VERIFY && !DRY_RUN) {
       console.log('\n--- Running verification ---');

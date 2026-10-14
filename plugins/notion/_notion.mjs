@@ -59,15 +59,16 @@ export function plain(prop) {
  * through the injected `fetchFn` (the plugin passes ctx.fetch so the engine's
  * allowedHosts/HTTPS/redirect guard applies); falls back to global fetch for
  * standalone use. Nothing here reads process.env.
- * @param {{ token: string, parent: string, fetch?: Function }} cfg
+ * @param {{ token: string, parent: string, fetch?: Function, delayMs?: number }} cfg
+ *   `delayMs` is the pause before each request (default 360ms, ~3 req/s).
  */
-export function createNotionClient({ token, parent, fetch: fetchFn = globalThis.fetch }) {
+export function createNotionClient({ token, parent, fetch: fetchFn = globalThis.fetch, delayMs = 360 }) {
   if (!token) throw new Error('NOTION_ACCESS_TOKEN is not set (.env) — the Notion plugin needs it to read/write.');
   const HEADERS = { Authorization: `Bearer ${token}`, 'Notion-Version': '2025-09-03', 'Content-Type': 'application/json' };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function api(path, method, body) {
-    await sleep(360); // ~3 req/s
+    await sleep(delayMs); // ~3 req/s at the default
     // ctx.fetch throws on non-2xx (its message carries the body); the !r.ok
     // branch below is the fallback when a plain global fetch is injected.
     const r = await fetchFn(`https://api.notion.com/v1/${path}`, { method, headers: HEADERS, body: body ? JSON.stringify(body) : undefined });
@@ -100,10 +101,12 @@ export function createNotionClient({ token, parent, fetch: fetchFn = globalThis.
     return out;
   }
 
-  async function queryDB(dataSourceId) {
+  async function queryDB(dataSourceId, opts = {}) {
     let cursor, all = [];
     do {
-      const j = await api(`data_sources/${dataSourceId}/query`, 'POST', { page_size: 100, start_cursor: cursor });
+      const body = { page_size: 100, ...opts };
+      if (cursor) body.start_cursor = cursor;
+      const j = await api(`data_sources/${dataSourceId}/query`, 'POST', body);
       all.push(...j.results);
       cursor = j.has_more ? j.next_cursor : null;
     } while (cursor);
