@@ -110,7 +110,8 @@
  *                               Omitted when the source doesn't say. Consumed
  *                               by scan.mjs's opt-in
  *                               `scan_history.dedup_include_language` and
- *                               written to scan-history.tsv. A source that
+ *                               `preferred_languages`, and written to
+ *                               scan-history.tsv. A source that
  *                               serves every language version of a posting at
  *                               one URL, told apart by a `language` / `lang` /
  *                               `locale` param, returns one Job per version,
@@ -198,6 +199,15 @@
  *                              A provider whose extra language versions cost extra
  *                              requests fetches them only when this is true; otherwise
  *                              the scan keeps one version per posting and drops the rest.
+ * @property {(language: string) => number} [preferredLanguageRank] Present only when
+ *                              portals.yml sets `preferred_languages`: the place of a
+ *                              language code in that list, best first, or -1 when it is
+ *                              not there. It compares codes by the scan's own rules
+ *                              (`en-GB` = `en`), so a provider passes its codes as the
+ *                              source names them. A provider that returns language
+ *                              versions selectively also returns the ranked ones, after
+ *                              each posting's default version; scan.mjs then keeps the
+ *                              best-ranked version where it keeps one per posting.
  */
 
 /**

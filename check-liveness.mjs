@@ -25,20 +25,28 @@ import {
   checkUrlLivenessWithFallback,
   createHeadedPageProvider,
   newLivenessPage,
-  jitteredDelayMs,
+  createHostSpacer,
+  takeSuppressedBlockCount,
   sleep,
 } from './liveness-browser.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
-import { planExpiredHistoryRows } from './liveness-core.mjs';
+import { planExpiredHistoryRows, trackerLivenessTargets, DEFAULT_TRACKER_STATUSES, planExpiredDiscards, postingClosedNote, DEFAULT_DISCARD_STATUSES } from './liveness-core.mjs';
 import { appendToScanHistory, normalizeUrlForDedup, SCAN_HISTORY_PATH } from './scan.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { existsSync, readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 
 const USAGE = `Usage:
   node check-liveness.mjs [--no-fallback] [--throttle[=ms]] [--no-record] <url1> [url2] ...
   node check-liveness.mjs [--no-fallback] [--throttle[=ms]] [--no-record] --file urls.txt
+  node check-liveness.mjs --tracker [--status=Evaluated,Applied]   # postings of tracker rows in these statuses
+  node check-liveness.mjs --tracker --discard-expired [--apply]    # dry-run move expired Evaluated rows to Discarded; --apply writes
   node check-liveness.mjs --no-record             # check only; write nothing to scan-history
   node check-liveness.mjs --help                  # print this usage block and exit
   node check-liveness.mjs -h                      # alias for --help`;
@@ -102,6 +110,52 @@ export async function recordExpiredVerdicts(verdicts) {
   });
 }
 
+const CODE_ROOT = dirname(fileURLToPath(import.meta.url));
+
+function runSetStatus(args, trackerPath) {
+  try {
+    return JSON.parse(execFileSync(process.execPath, [join(CODE_ROOT, 'set-status.mjs'), ...args], {
+      encoding: 'utf-8',
+      env: { ...process.env, CAREER_OPS_TRACKER: trackerPath },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }));
+  } catch (err) {
+    try {
+      return JSON.parse(err.stdout);
+    } catch {
+      return { error: (typeof err.stderr === 'string' && err.stderr.trim()) || err.message };
+    }
+  }
+}
+
+/**
+ * Move planned rows to Discarded through set-status.mjs (locked atomic write).
+ * Dry-run when apply is false: resolve only, write nothing.
+ *
+ * The liveness sweep can take minutes, so each row is planned again against
+ * the tracker as it is now, and set-status refuses the write under its lock
+ * if the tracker changed after that re-plan.
+ *
+ * @param {{num: number, company: string, role: string, status: string, url: string}[]} rows
+ * @param {{apply: boolean, note: string, trackerPath: string, reportsRoot: string}} options
+ * @returns {{num: number, company: string, role: string, url: string, changed: boolean, dryRun: boolean, error?: string, skipped?: string}[]}
+ */
+export function discardExpiredRows(rows, { apply, note, trackerPath, reportsRoot }) {
+  return rows.map((row) => {
+    const base = { num: row.num, company: row.company, role: row.role, url: row.url, changed: false, dryRun: !apply };
+    const current = readFileSync(trackerPath, 'utf-8');
+    if (!planExpiredDiscards(current, [row.url], { reportsRoot }).some((r) => r.num === row.num)) {
+      return { ...base, skipped: 'no longer Evaluated with this posting' };
+    }
+    const args = ['--row', String(row.num), 'Discarded', '--note', note, '--json',
+      '--expect-tracker', createHash('sha256').update(current, 'utf8').digest('hex')];
+    if (!apply) args.push('--dry-run');
+    const out = runSetStatus(args, trackerPath);
+    if (out.error) return { ...base, error: out.error };
+    return { ...base, changed: Boolean(out.changed), dryRun: Boolean(out.dryRun) || !apply };
+  });
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -114,22 +168,53 @@ async function main() {
   // On a challenge we retry once in a headed browser (which clears it); pass
   // --no-fallback to stay fully headless (e.g. on a machine with no display).
   const noFallback = args.includes('--no-fallback');
-  // --throttle or --throttle=<ms>: wait base..2*base ms (jittered) between checks
+  // --throttle or --throttle=<ms>: wait base..2*base ms (jittered) between browser
+  // checks of the same host (createHostSpacer in liveness-browser.mjs)
   // to stay under rate-based WAF limits. pracuj.pl's Cloudflare flags the session
   // after ~2 rapid hits, so a bulk run needs spacing. Default base 5000ms.
   const throttleArg = args.find((a) => a === '--throttle' || a.startsWith('--throttle='));
   const throttleBaseMs = throttleArg ? (Number(throttleArg.split('=')[1]) || 5000) : 0;
   const record = recordingEnabled(args);
-  const positional = args.filter((a) => a !== '--no-fallback' && a !== '--no-record' && a !== throttleArg);
+  const statusArg = args.find((a) => a.startsWith('--status='));
+  const fromTracker = args.includes('--tracker');
+  const discardExpired = args.includes('--discard-expired');
+  const applyDiscards = args.includes('--apply');
+  const positional = args.filter((a) => a !== '--no-fallback' && a !== '--no-record' && a !== throttleArg
+    && a !== '--tracker' && a !== '--discard-expired' && a !== '--apply' && a !== statusArg);
 
-  if (positional.length === 0) {
+  if (discardExpired && !fromTracker) {
+    console.error('--discard-expired requires --tracker.');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (positional.length === 0 && !fromTracker) {
     console.error(USAGE);
     process.exitCode = 1;
     return;
   }
 
   let urls;
-  if (positional[0] === '--file') {
+  const labels = new Map();
+  let trackerPath = null;
+  let trackerText = null;
+  let reportsRoot = null;
+  if (fromTracker) {
+    const root = getCareerOpsRoot();
+    trackerPath = resolveTrackerPath(root);
+    reportsRoot = join(root, 'reports');
+    if (!existsSync(trackerPath)) {
+      console.error(`No tracker at ${trackerPath}. Evaluate a role first.`);
+      process.exitCode = 1;
+      return;
+    }
+    trackerText = readFileSync(trackerPath, 'utf-8');
+    const statuses = statusArg ? statusArg.slice('--status='.length).split(',') : DEFAULT_TRACKER_STATUSES;
+    const { targets, noUrl } = trackerLivenessTargets(trackerText, { statuses, reportsRoot });
+    console.log(`Tracker rows with status ${statuses.join(' or ')}: ${targets.length} with a posting URL${noUrl.length ? `, ${noUrl.length} without (${noUrl.map((n) => `#${n}`).join(' ')})` : ''}`);
+    for (const t of targets) labels.set(t.url, `#${t.num} ${t.company} · ${t.role} (${t.status})`);
+    urls = targets.map((t) => t.url);
+  } else if (positional[0] === '--file') {
     const text = await readFile(positional[1], 'utf-8');
     urls = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   } else {
@@ -162,14 +247,20 @@ async function main() {
 
   let active = 0, expired = 0, uncertain = 0, viaApi = 0;
   const verdicts = [];
+  // --throttle spaces repeat browser visits to the same host; the API rung is
+  // cheap and not WAF-rate-limited, so it never waits.
+  const spacer = createHostSpacer(throttleBaseMs);
+  // An Ashby board answers for every posting under its org: fetch each board
+  // once per run, not once per posting.
+  const boardCache = new Map();
 
   // Sequential — project rule: never Playwright in parallel
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
-    let result, reason, code, usedBrowser = false;
+    let result, reason, code;
 
     // Rung 1: zero-token ATS API check. A conclusive active/expired wins; otherwise fall through.
-    const api = await checkLivenessViaApi(url);
+    const api = await checkLivenessViaApi(url, { boardCache });
     if (api) {
       ({ result, reason, code } = api);
       viaApi++;
@@ -183,9 +274,15 @@ async function main() {
       // were not confirmed.
       try {
         await ensureBrowser();
+        const wait = spacer.waitBefore(url);
+        if (wait) await sleep(wait);
         const getHeadedPage = headed ? () => headed.get() : undefined;
-        ({ result, reason, code } = await checkUrlLivenessWithFallback(page, url, { getHeadedPage }));
-        usedBrowser = true;
+        try {
+          ({ result, reason, code } = await checkUrlLivenessWithFallback(page, url, { getHeadedPage }));
+        } finally {
+          // A failed visit counts too: that is when a WAF is most likely involved.
+          spacer.visited(url);
+        }
       } catch (err) {
         result = 'uncertain';
         code = 'browser_unavailable';
@@ -194,22 +291,20 @@ async function main() {
     }
 
     const icon = { active: '✅', expired: '❌', uncertain: '⚠️' }[result];
-    console.log(`${icon} ${result.padEnd(10)} ${api ? '(api) ' : '      '}${url}`);
+    console.log(`${icon} ${result.padEnd(10)} ${api ? '(api) ' : '      '}${labels.has(url) ? `${labels.get(url)}  ` : ''}${url}`);
     if (result !== 'active') console.log(`           ${reason}`);
     if (result === 'active') active++;
     else if (result === 'expired') expired++;
     else uncertain++;
     verdicts.push({ url, result, code });
-
-    // Throttle only matters between browser checks (the API is cheap, not WAF-rate-limited).
-    const wait = usedBrowser && i < urls.length - 1 ? jitteredDelayMs(throttleBaseMs) : 0;
-    if (wait) await sleep(wait);
   }
 
   if (headed) await headed.close();
   if (browser) await browser.close();
 
   console.log(`\nResults: ${active} active  ${expired} expired  ${uncertain} uncertain  (${viaApi} via API, no browser)`);
+  const quietBlocks = takeSuppressedBlockCount();
+  if (quietBlocks) console.log(`(${quietBlocks} tracker/analytics requests skipped: their host had no usable address, e.g. a DNS ad-blocker; not counted against any posting)`);
 
   // Close the loop: the verdict is the expensive part of this run and it used
   // to die with the process. `--no-record` leaves no trace, so the write is
@@ -217,6 +312,38 @@ async function main() {
   if (record) {
     const recorded = await recordExpiredVerdicts(verdicts);
     if (recorded > 0) console.log(`Recorded ${recorded} expired posting(s) in ${SCAN_HISTORY_PATH}`);
+  }
+
+  if (discardExpired) {
+    const expiredUrls = verdicts.filter((v) => v.result === 'expired').map((v) => v.url);
+    const planned = planExpiredDiscards(trackerText, expiredUrls, {
+      statuses: DEFAULT_DISCARD_STATUSES,
+      reportsRoot,
+    });
+    const note = postingClosedNote(localToday());
+    if (planned.length === 0) {
+      console.log('\nDiscard expired: no Evaluated rows matched an expired posting.');
+    } else {
+      const mode = applyDiscards ? 'apply' : 'dry-run';
+      console.log(`\nDiscard expired (${mode}): ${planned.length} Evaluated row(s) → Discarded`);
+      const results = discardExpiredRows(planned, { apply: applyDiscards, note, trackerPath, reportsRoot });
+      for (const r of results) {
+        if (r.skipped) {
+          console.log(`  · #${r.num} ${r.company} · ${r.role} — skipped, ${r.skipped}`);
+          continue;
+        }
+        if (r.error) {
+          console.log(`  ❌ #${r.num} ${r.company} · ${r.role} — ${r.error}`);
+          process.exitCode = 1;
+          continue;
+        }
+        const verb = r.dryRun ? 'would discard' : (r.changed ? 'discarded' : 'already Discarded');
+        console.log(`  ${r.dryRun ? '·' : '✅'} #${r.num} ${r.company} · ${r.role} — ${verb} (${note})`);
+      }
+      if (!applyDiscards) {
+        console.log('Re-run with --apply to write. Uncertain and Applied rows are left alone.');
+      }
+    }
   }
 
   if (expired > 0 || uncertain > 0) process.exitCode = 1;

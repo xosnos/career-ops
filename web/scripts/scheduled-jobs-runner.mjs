@@ -15,6 +15,7 @@ import { nextScheduledRun } from "../src/lib/scheduled-cadence.mjs";
 import { isMainModule } from "../../lib/is-main-module.mjs";
 import { scheduledRunnerResourcePath, scheduledStorePath } from "../src/lib/scheduled-runner-path.mjs";
 import { getCareerOpsRoot } from "../../path-resolver.mjs";
+import { getProfilePath } from "../src/lib/core/profile-path.mjs";
 
 const CODE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const MAX_RUNS = 100;
@@ -203,7 +204,14 @@ export function executeJob(root, job, options = {}) {
         [command.script, ...command.args],
         {
           cwd: CODE_ROOT,
-          env: { ...process.env, CAREER_OPS_ROOT: root, CAREER_OPS_PORTALS: tempPortals },
+          env: {
+            ...process.env,
+            CAREER_OPS_ROOT: root,
+            CAREER_OPS_PORTALS: tempPortals,
+            // The scanner runs with cwd = the checkout; a relative override is
+            // resolved here, the way the web resolves it, so both read one file.
+            ...(process.env.CAREER_OPS_PROFILE?.trim() ? { CAREER_OPS_PROFILE: getProfilePath(root) } : {}),
+          },
           encoding: "utf8",
           timeout: SCAN_TIMEOUT_MS,
           maxBuffer: MAX_OUTPUT_BYTES,

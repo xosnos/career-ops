@@ -2,7 +2,7 @@
 
 > Free-text answers と cover-letter fields には `voice-dna.md`（存在する場合）を適用する。Full guardrail、conversational voice included（Tier 1 + Tier 2）。`_writing.md` → Voice DNA を参照。
 
-候補者が Chrome で応募フォームを入力しているときの interactive mode。画面上の内容を読み、事前評価済みの求人 context を読み込み、フォームの各質問に personalized responses を生成する。
+候補者がこのプロジェクトが起動する Playwright ブラウザで応募フォームを入力しているときの interactive mode。画面上の内容を読み、事前評価済みの求人 context を読み込み、フォームの各質問に personalized responses を生成する。
 
 ## Requirements
 
@@ -12,7 +12,7 @@
 ## Workflow
 
 ```text
-1. DETECT      → Read active Chrome tab (screenshot/URL/title)
+1. DETECT      → このプロジェクトの Playwright ブラウザで求人を開く
 2. IDENTIFY    → Extract company + role from the page
 3. SEARCH      → Match against existing reports in reports/
 4. LOAD        → Read full report + Section G (if it exists)
@@ -21,6 +21,11 @@
 7. GENERATE    → For each question, generate a personalized response
 8. PRESENT     → Show formatted responses for copy-paste
 ```
+
+## Scope
+
+Follow the Scope section in `modes/apply.md`. Run `node apply-scope.mjs root` and stay inside the directories it prints. Launch with `node apply-scope.mjs launch-options`. Do not read `DevToolsActivePort` or attach to an existing browser. Do not submit the form.
+
 
 ## Step 5 -- Preflight gate
 
@@ -42,7 +47,7 @@ Application answers を生成する前に、form が意図した active job を�
 
 ## Step 1 -- Detect the job
 
-**With Playwright:** active page の snapshot を取得する。Title、URL、visible content を読む。
+**With Playwright:** `node apply-scope.mjs launch-options` で起動したウィンドウに求人を開き、title、URL、visible content を読む。
 
 **Without Playwright:** 候補者に以下を依頼する：
 - Form の screenshot を共有（Read tool で画像を読める）
@@ -136,7 +141,7 @@ Notes:
 ## Step 8 -- Post-apply (optional)
 
 候補者が application を submitted したと確認した場合：
-1. 正規 CLI で status を "Applied" に update: `node set-status.mjs <report#> Applied`（`applications.md` のテーブルを手動編集しない）
+1. 正規 CLI で status を "Applied" に update: `node set-status.mjs --report <report#> Applied`（`applications.md` のテーブルを手動編集しない）
 2. Report の Section G を final responses で update
 3. Next step として LinkedIn outreach 用の `/career-ops contacto` を提案
 

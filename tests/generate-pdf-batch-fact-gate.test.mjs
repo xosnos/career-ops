@@ -15,9 +15,11 @@
 import { spawnSync } from 'child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { pass, fail, rmSync, linkRepoPackage, ROOT, NODE } from './helpers.mjs';
+import { pass, fail, rmSync, linkRepoPackage, ROOT, NODE, SANDBOX_DATA_ROOT } from './helpers.mjs';
 
-const outputRoot = join(ROOT, 'output');
+// Under the suite's own data root, not the checkout's output/: that directory
+// is the developer's, and an interrupted run left this fixture in it (#5113).
+const outputRoot = join(SANDBOX_DATA_ROOT, 'output');
 mkdirSync(outputRoot, { recursive: true });
 // realpathSync for the reason generate-pdf-batch.test.mjs documents (#3165):
 // the main-module guard compares realpaths.
@@ -33,7 +35,7 @@ for (const file of [
   'cv-sections-core.mjs', 'path-resolver.mjs',
 ]) copyFileSync(join(ROOT, file), join(sandbox, file));
 mkdirSync(join(sandbox, 'lib'), { recursive: true });
-for (const file of ['is-main-module.mjs', 'page-format.mjs']) {
+for (const file of ['is-main-module.mjs', 'page-format.mjs', 'dir-lock.mjs', 'yaml-document.mjs']) {
   copyFileSync(join(ROOT, 'lib', file), join(sandbox, 'lib', file));
 }
 mkdirSync(join(sandbox, 'data'), { recursive: true });
@@ -72,6 +74,8 @@ writeFileSync(join(sandbox, 'cv.md'), '# Jordan Example\n\n- Led a team of 4 eng
 writeFileSync(join(sandbox, 'honest.html'), cvDoc('Led a team of 4 engineers and cut p95 latency by 30%.'), 'utf-8');
 writeFileSync(join(sandbox, 'inflated.html'), cvDoc('Led a team of 40 engineers and cut p95 latency by 30%.'), 'utf-8');
 writeFileSync(join(sandbox, 'honest-too.html'), cvDoc('Cut p95 latency by 30%.'), 'utf-8');
+// Counts the English-only extractor cannot read: the gate warns, and says why.
+writeFileSync(join(sandbox, 'french.html'), cvDoc('Dirigé 45 techniciens de maintenance sur 3 chantiers.'), 'utf-8');
 
 function run(args) {
   const result = spawnSync(NODE, [script, ...args], {
@@ -139,6 +143,19 @@ try {
     pass('--batch --skip-fact-check renders every entry without running the gate');
   } else {
     fail(`--batch --skip-fact-check: status=${skipped.status} results=${JSON.stringify(skipped.results)}\n${skipped.output.trim()}`);
+  }
+
+  // The warning carries its reason (#5348). runFactGate printed the header and
+  // the advisory phrases but never the coverage note, so a document the gate
+  // could not read showed "CV fact check warning" with nothing under it.
+  const french = run(['french.html', 'single/french.pdf']);
+  if (french.status === 0
+      && /CV fact check warning: french\.html/.test(french.output)
+      && /not checked: 2 count-like claims/.test(french.output)
+      && /45 techniciens/.test(french.output)) {
+    pass('a warning prints what the gate could not check, not just the header');
+  } else {
+    fail(`single-file coverage warning: status=${french.status}\n${french.output.trim()}`);
   }
 
   const singleSkipped = run(['inflated.html', 'single/inflated-skipped.pdf', '--skip-fact-check']);

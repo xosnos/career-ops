@@ -6,22 +6,19 @@
 // totals and exit code. Without that, a faster run is just a different run, and
 // nobody can tell a suite that broke from a runner that dropped it.
 //
-// The runner is driven the way a contributor drives it, through its CLI. A copy
-// of test-all.mjs and the modules it imports goes into a temp directory with a
-// small `tests/` of fixture suites, so discovery, flag parsing, the child
-// runner and the summary are all the real ones. The copy is built by following
-// test-all.mjs's own static imports, so a module added to them tomorrow is
-// copied tomorrow.
+// The runner is driven the way a contributor drives it, through its CLI, in a
+// sandbox holding the real test-all.mjs and a small `tests/` of fixture suites
+// (tests/test-all-sandbox.mjs).
 //
 // The fixtures spell three things in pieces: the exit call, the summary call
 // and the test-runner import. This file is itself a discovered suite, and the
 // runner decides what to do with a suite by reading its source for exactly
 // those.
-import { pass, fail, rmSync, linkRepoPackage, ROOT, NODE } from './helpers.mjs';
-import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { availableParallelism, tmpdir } from 'node:os';
-import { dirname, join, normalize } from 'node:path';
+import { pass, fail } from './helpers.mjs';
+import { createRunnerSandbox, helpers, sleep } from './test-all-sandbox.mjs';
+import { existsSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
+import { join } from 'node:path';
 
 console.log('\ntest-all.mjs --jobs — discovered suites in parallel');
 
@@ -29,73 +26,11 @@ const EXIT_CALL = 'process.' + 'exit(1)';
 const SUMMARY_CALL = 'fin' + 'ish()';
 const RUNNER_IMPORT = "import { test } from 'node:" + "test';";
 
-// ── a sandbox holding the real runner and a fixture tests/ ──────────────────
-const sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'career-ops-jobs-test-')));
-
-/** Copy `entry` and everything it statically imports by relative path. */
-function copyWithImports(entry) {
-  const seen = new Set();
-  const queue = [entry];
-  while (queue.length) {
-    const rel = queue.pop();
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-    const from = join(ROOT, rel);
-    if (!existsSync(from)) continue;
-    mkdirSync(dirname(join(sandbox, rel)), { recursive: true });
-    copyFileSync(from, join(sandbox, rel));
-    if (!rel.endsWith('.mjs')) continue;
-    // Statements that start a line only: test-all.mjs also names modules inside
-    // inline sections that never run under --only, and following those would
-    // copy most of the repository.
-    const src = readFileSync(from, 'utf-8');
-    for (const m of src.matchAll(/^(?:import|export)\s[^'"\n]*?from\s+['"](\.{1,2}\/[^'"]+)['"]/gm)) {
-      queue.push(normalize(join(dirname(rel), m[1])).split('\\').join('/'));
-    }
-  }
-  return seen;
-}
-
-function suite(rel, body) {
-  const at = join(sandbox, 'tests', rel);
-  mkdirSync(dirname(at), { recursive: true });
-  writeFileSync(at, body.join('\n') + '\n', 'utf-8');
-}
-
-const helpers = (depth) => `import { pass, fail, warn, QUICK } from '${'../'.repeat(depth)}helpers.mjs';`;
-const sleep = (ms) => `await new Promise((r) => setTimeout(r, ${ms}));`;
-
-/** Run the sandboxed runner. CAREER_OPS_TEST_JOBS is blank unless a case sets it. */
-function runner(args, env = {}) {
-  const r = spawnSync(NODE, [join(sandbox, 'test-all.mjs'), ...args], {
-    cwd: sandbox,
-    encoding: 'utf-8',
-    timeout: 120_000,
-    env: { ...process.env, CAREER_OPS_TEST_JOBS: '', ...env },
-  });
-  // The runner names a suite by its path relative to the repo, in the platform's
-  // own spelling: `tests\order\a.test.mjs` on Windows. The expectations below
-  // are written once, with forward slashes, so the captured output is brought
-  // to that spelling here. (The first Windows run of this suite failed seven
-  // checks on exactly this, with the runner itself behaving correctly.)
-  const stdout = (r.stdout ?? '').replaceAll('\\', '/');
-  return {
-    status: r.status,
-    stdout,
-    all: `${stdout}${r.stderr ?? ''}`,
-    // The lines a reader scans a run for, in the order they were printed.
-    verdicts: stdout.split('\n').map((l) => l.trim()).filter((l) => /^(✅|❌|⚠️)/u.test(l)),
-    totals: (stdout.match(/📊 Results: .*/u) ?? [''])[0],
-    timing: (stdout.match(/⏱ {2}\d+ discovered suites in .*/u) ?? [''])[0],
-  };
-}
+const { sandbox, copied, suite, runner, remove } = createRunnerSandbox('career-ops-jobs-test-');
 
 const check = (name, ok, detail) => (ok ? pass(name) : fail(`${name}${detail ? ` — ${detail}` : ''}`));
 
 try {
-  const copied = copyWithImports('test-all.mjs');
-  copyWithImports('tests/run-discovered-child.mjs');
-  linkRepoPackage(sandbox, 'js-yaml');
   check('the sandbox holds the runner, its helpers and the child runner',
     copied.has('tests/helpers.mjs') && existsSync(join(sandbox, 'tests', 'run-discovered-child.mjs')),
     `copied: ${[...copied].join(', ')}`);
@@ -244,5 +179,5 @@ try {
       `status=${r.status}\n${r.stdout}`);
   }
 } finally {
-  rmSync(sandbox, { recursive: true, force: true });
+  remove();
 }

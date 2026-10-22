@@ -118,7 +118,7 @@ const SUBMIT_TERMS = [
   // es
   "enviar", "finalizar",
   // de
-  "absenden", "abschicken", "bewerbung senden",
+  "absenden", "abschicken", "bewerbung senden", "senden",
   // fr
   "envoyer", "soumettre",
   // it
@@ -128,9 +128,19 @@ const SUBMIT_TERMS = [
   // nl
   "verzend(en)?", "verstu(ur|ren)", "sollicitatie (versturen|verzenden)",
   // pl
-  "wyślij",
+  "wyślij", "prześlij",
   // ru
   "отправить", "откликнуться",
+  // ua
+  "надіслати", "подати",
+  // ar
+  "إرسال", "تقديم",
+  // id
+  "kirim",
+  // hi
+  "जमा करें", "सबमिट",
+  // da
+  "indsend", "send ansøgning",
   // tr
   "gönder", "başvur",
 ];
@@ -151,7 +161,8 @@ const SUBMIT_TERMS = [
 // the person clicks it, which is the side this guard errs on.
 const IN_FORM_TERMS = [
   "apply( now| for this job)?",
-  "postuler", "candidati", "candidatar-se", "solliciteren", "solliciteer", "aplikuj", "bewerben",
+  "postuler", "candidati", "candidatar(-se|-me)?", "solliciteren", "solliciteer", "aplikuj", "bewerben",
+  "postular(me|se)?", "відгукнутися", "lamar", "आवेदन करें", "ansøg",
   "send",
 ];
 

@@ -207,11 +207,12 @@ try {
     },
   };
 
-  // The plugin reads its processed-id cursor from `data/gmail-state.json`
-  // relative to the working directory, not CAREER_OPS_ROOT. `dryRun` stops the
-  // write but not the read, so run from an empty directory: otherwise a message
-  // id the checkout's own cursor already lists would be skipped, and the result
-  // would depend on whatever state the machine happens to carry.
+  // The plugin reads its processed-id cursor from `data/gmail-state.json` under
+  // ctx.dataRoot, and, when there is none, from the same path under the working
+  // directory, where earlier versions kept it. `dryRun` stops the write but not
+  // the read, so point both at an empty directory: otherwise a message id the
+  // checkout's own cursor already lists would be skipped, and the result would
+  // depend on whatever state the machine happens to carry.
   const cwd = process.cwd();
   const sandbox = mkdtempSync(join(tmpdir(), 'gmail-ingest-'));
   const origWarn = console.warn;
@@ -219,7 +220,7 @@ try {
   try {
     process.chdir(sandbox);
     console.warn = () => {}; // the spoofed message logs an expected skip
-    jobs = await gmail.ingest(ctx);
+    jobs = await gmail.ingest({ ...ctx, dataRoot: sandbox });
   } finally {
     console.warn = origWarn;
     process.chdir(cwd);

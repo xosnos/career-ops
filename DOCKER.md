@@ -58,7 +58,8 @@ Unknown subcommands fall through to `docker compose exec` so anything works:
 ```bash
 ./cops up        # start (idempotent)
 ./cops down      # stop and remove the container (volumes kept)
-./cops rebuild   # full rebuild (use after Dockerfile or deps change)
+./cops rebuild   # rebuild the image and recreate the node_modules volume
+                 # (use after Dockerfile or deps change)
 ./cops logs      # tail container logs
 ```
 
@@ -68,7 +69,8 @@ Unknown subcommands fall through to `docker compose exec` so anything works:
   Go (for the dashboard), LaTeX (for `generate-latex.mjs`), and project deps.
 - `docker-compose.yml` — bind-mounts the project at `/app` so host edits appear
   inside the container immediately. `node_modules` lives in a named volume to
-  avoid host/container ABI mismatches.
+  avoid host/container ABI mismatches. Docker fills that volume from the image
+  only when it is created, so `./cops rebuild` removes and recreates it.
 - `.dockerignore` — keeps generated and personal data out of the build context.
 
 ## API keys
@@ -101,8 +103,9 @@ Career-ops updates work the same as native:
 ./cops update
 ```
 
-If `package.json` deps change, run `./cops rebuild` once to refresh the image
-layer that holds `node_modules`.
+If `package.json` deps change, run `./cops rebuild` once. It rebuilds the image
+and recreates the `node_modules` volume from it, so the container picks up the
+new packages.
 
 ## Troubleshooting
 

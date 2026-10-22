@@ -137,9 +137,12 @@ Değerlendirmenin tamamını `reports/{###}-{sirket-slug}-{YYYY-MM-DD}.md` olara
      eder; yapmaması gereken, kullanıcının gerçekten sahip olduğu bir hedefin yerine
      geçmektir. -->
 **Puan:** {X.X}/5
+**Karar:** {Başvur | Değerlendir | Önce araştır | Geç}
 **URL:** {ilan URL'si}
 **PDF:** ✅/❌
 **Meşruiyet:** {Güvenilir | Dikkatli İlerle | Şüpheli}
+
+{`## Karar (lead)` cümlesi, kelimesi kelimesine}
 
 ---
 
@@ -262,7 +265,7 @@ Ardından `node merge-tracker.mjs` çalıştır.
 - **Üst düzey / niş roller:** Staff+, VP, Direktör veya yüksek uzmanlaşma gerektiren roller meşru olarak aylarca açık kalabilir.
 - **Erken aşama startup:** Rol henüz tam şekillenmemiş olduğundan ilanın muğlak yazılmış olması normaldir. İçerik belirsizliğine daha az ağırlık ver.
 - **Tarih bilgisi yok:** Yayın tarihi belirlenemiyorsa ve başka endişe verici sinyal yoksa varsayılan olarak "Dikkatli İlerle" kullan. Kanıt olmaksızın asla "Şüpheli" deme.
-- **Recruiter kaynağı (kamuya açık ilan yok):** Tazelik sinyali alınamaz. Aktif recruiter temasının kendisinin olumlu bir meşruiyet sinyali olduğunu not et.
+- **Recruiter kaynağı (ilan linki gönderen recruiter teması dahil):** Tazelik sinyali sadece ilanın snapshot'ı yoksa alınamaz; recruiter'ın gönderdiği ilan kontrol edildiyse tarih ve Apply butonu bulguları korunur. Recruiter teması tek başına Nötr'dür, olumlu bir meşruiyet sinyali değildir. Seviye vermeden önce recruiter'ın kimliğini doğrula: (a) şirketin kendi kariyer sayfası veya herkese açık ATS board'u bu rolü listeliyor mu; (b) bilinen bir markaya eklenmiş tanıdık olmayan bir isim ayrı bir kurum olarak kontrol edilir; (c) recruiter'ın email domain'i veya bağımsız bir kaynak onu şirkete bağlıyor mu; (d) tek bir arama: `"{isim}" scam OR "fake recruiter" OR "fake job"`; (e) gönderdiği kodu klonlamanı, kurmanı veya çalıştırmanı, bu kod açıkken ekran paylaşmanı, Telegram/WhatsApp/Discord'a geçmeni ya da herhangi bir ödeme yapmanı istiyor mu. (a) tek bir sorgu, (d) tek bir arama kullanır; (b), (c) ve (e) yeni arama yapmaz, sadece yapıştırılan metni, (a) ve (d)'nin sonuçlarını ve zaten yapılmış araştırmayı kullanır. Kanıt yoksa kontrol Bilinmiyor (Nötr) kalır, asla Endişe Verici sayılmaz. (a) veya (d) Endişe Verici ve bir kontrol daha Endişe Verici ise "Şüpheli". Bu doğrulama yüzünden seviye "Şüpheli" olursa kısa ve suçlamayan bir not ekle: hangi kontroller Endişe Verici çıktı ve kaynakları ne, rolü şirketin kendi domain'indeki bir email adresinden teyit etmesi ve recruiter'ın gönderdiği kodu çalıştırmaması. Recruiter'ın gönderdiği repo, arşiv veya linki asla klonlama, kurma, açma ya da çalıştırma.
 
 ---
 

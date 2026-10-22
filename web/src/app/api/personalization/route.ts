@@ -1,8 +1,10 @@
-import { careerOpsRoot } from "@/lib/career-ops";
+import { pathToFileURL } from "node:url";
+import { careerOpsRoot, rootScript } from "@/lib/career-ops";
 import { resolveCodeRoot } from "@/lib/core/code-root.mjs";
 import { atomicWriteWithBackup } from "@/lib/core/safe-write";
 import { coercePersonalization, SECTIONS } from "@/lib/personalization.mjs";
 import { readPersonalizationState, savePersonalization, UnsureProfileParseError } from "@/lib/personalization-file.mjs";
+import { readJsonObject } from "@/lib/json-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,21 +31,22 @@ function failure(e: unknown): Response {
   return Response.json({ error: e instanceof Error ? e.message : "personalization unavailable" }, { status: 500 });
 }
 
+async function corePersonalization() {
+  return import(/* webpackIgnore: true */ pathToFileURL(rootScript("lib/personalization")).href);
+}
+
 export async function GET() {
   try {
-    return Response.json(readPersonalizationState(careerOpsRoot(), codeRoot()));
+    const core = await corePersonalization();
+    return Response.json(readPersonalizationState(careerOpsRoot(), codeRoot(), core));
   } catch (e) {
     return failure(e);
   }
 }
 
 export async function POST(req: Request) {
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return Response.json({ error: "bad json" }, { status: 400 });
-  }
+  const body = await readJsonObject<Record<string, unknown>>(req);
+  if (!body) return Response.json({ error: "bad json" }, { status: 400 });
   const patch = coercePersonalization(body) as Record<string, unknown>;
   if (Object.keys(patch).length === 0) return Response.json({ error: "nothing to write" }, { status: 400 });
 
@@ -53,7 +56,8 @@ export async function POST(req: Request) {
   // DATA-LOSS GUARD (same class as /api/profile, #649/#704/#920/#958): a missing
   // file is seeded from the template; an existing one is merged, never replaced.
   try {
-    const { ids, merged } = savePersonalization({ dataRoot: careerOpsRoot(), codeRoot: codeRoot(), patch, dryRun, write: atomicWriteWithBackup });
+    const core = await corePersonalization();
+    const { ids, merged } = savePersonalization({ dataRoot: careerOpsRoot(), codeRoot: codeRoot(), patch, dryRun, write: atomicWriteWithBackup, core });
     if (dryRun) return Response.json({ ok: true, dryRun: true, sections: ids, preview: merged });
     const labels = SECTIONS.filter((s) => ids.includes(s.id)).map((s) => s.heading.replace(/^## Your /, ""));
     return Response.json({ ok: true, sections: ids, labels });

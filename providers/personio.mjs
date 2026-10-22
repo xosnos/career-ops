@@ -27,11 +27,18 @@ import { fetchTextWithRetry, sleep } from './_http.mjs';
 // - Default: one fetch of `/`, each posting in its own default language. A
 //   `?language=xx` on careers_url asks for that language instead, wherever a
 //   posting has it.
+// - `ctx.preferredLanguageRank` (portals.yml preferred_languages), no
+//   careers_url language: one more fetch of `/` per preferred language some
+//   posting has, up to MAX_EXTRA_LANGUAGES, so those versions come back next
+//   to the default one and scan.mjs keeps the best-ranked one.
 // - `ctx.dedupIncludeLanguage` (scan_history.dedup_include_language): one more
 //   fetch of `/` per further language, up to MAX_EXTRA_LANGUAGES, so every
 //   version comes back; each posting's default-language version first, which
-//   scan.mjs's language-aware URL dedup relies on. Skipped under a health probe
-//   (`ctx.maxPages`), which needs one listing request and nothing more.
+//   scan.mjs's language-aware URL dedup relies on. A careers_url language does
+//   not narrow this: it and then the preferred languages are only fetched
+//   first, so the cap skips the other languages before a preferred one.
+// The extra fetches are skipped under a health probe (`ctx.maxPages`), which
+// needs one listing request and nothing more.
 //
 // The payload is undocumented, so when `/` yields nothing (fetch failure, or a
 // changed page build) the provider falls back to `/xml`, parsed in-process
@@ -154,9 +161,13 @@ export default {
     const probing = Number(ctx.maxPages) > 0;
     const allLanguages = ctx.dedupIncludeLanguage === true && !probing;
     const preferred = preferredLanguage(entry);
-    // Every language is fetched anyway, so the first fetch is the defaults one:
+    const rank = typeof ctx.preferredLanguageRank === 'function' ? ctx.preferredLanguageRank : null;
+    // A careers_url language is a per-entry choice and wins over the scan-wide
+    // preferred_languages, so those are fetched only when the entry names none.
+    const preferredVersions = !allLanguages && !probing && preferred === null && rank !== null;
+    // When further languages are fetched, the first fetch is the defaults one:
     // it is what puts each posting's default-language version first.
-    const language = allLanguages ? null : preferred;
+    const language = allLanguages || preferredVersions ? null : preferred;
 
     // redirect:'error' prevents SSRF via server-side redirects; combined with
     // assertPersonioUrl it guarantees the final hostname stays in-domain.
@@ -169,7 +180,10 @@ export default {
     const postings = page === null ? [] : parsePersonioListing(page);
     if (postings.length > 0) {
       const versions = postings.map(posting => [posting]);
-      if (allLanguages) await addLanguageVersions(entry.name, host, postings, versions, ctx, preferred);
+      if (allLanguages) await addLanguageVersions(entry.name, host, postings, versions, ctx, preferred, rank);
+      else if (preferredVersions) {
+        await addLanguageVersions(entry.name, host, postings, versions, ctx, null, rank, language => rank(language) >= 0);
+      }
       return versions.flat()
         .map(posting => listingPostingToJob(posting, entry.name, host))
         .filter(job => job !== null);
@@ -199,7 +213,8 @@ export default {
  * its entry in `versions`. Best-effort: a language whose fetch fails is skipped
  * and the versions already collected stand. Languages past MAX_EXTRA_LANGUAGES
  * are not fetched, with a warning; the order is the careers_url language
- * first, then code order, so the cap never drops the language asked for.
+ * first, then the preferred languages best first, then code order, so the cap
+ * skips the languages nobody asked for before one that was asked for.
  *
  * @param {string} companyName
  * @param {string} host
@@ -207,12 +222,19 @@ export default {
  * @param {ListingPosting[][]} versions - Parallel to `postings`; appended to.
  * @param {any} ctx
  * @param {string|null} preferred - The careers_url language, if any.
+ * @param {((language: string) => number)|null} rank - ctx.preferredLanguageRank, if set.
+ * @param {(language: string) => boolean} [keep] - Fetch only the languages it accepts.
  */
-async function addLanguageVersions(companyName, host, postings, versions, ctx, preferred) {
+async function addLanguageVersions(companyName, host, postings, versions, ctx, preferred, rank, keep = () => true) {
   const indexById = new Map(postings.map((posting, i) => [posting.id, i]));
+  const order = (language) => {
+    if (language === preferred) return -1;
+    const r = rank ? rank(language) : -1;
+    return r < 0 ? Number.MAX_SAFE_INTEGER : r;
+  };
   const wanted = [...new Set(postings.flatMap(posting =>
-    posting.availableLanguages.filter(language => language !== posting.currentLocale)))]
-    .sort((a, b) => Number(b === preferred) - Number(a === preferred) || a.localeCompare(b));
+    posting.availableLanguages.filter(language => language !== posting.currentLocale && keep(language))))]
+    .sort((a, b) => order(a) - order(b) || a.localeCompare(b));
   const languages = wanted.slice(0, MAX_EXTRA_LANGUAGES);
   if (languages.length < wanted.length) {
     console.warn(`personio: ${companyName}: ${wanted.length} further languages exceed the cap of ${MAX_EXTRA_LANGUAGES}; skipped ${wanted.slice(MAX_EXTRA_LANGUAGES).join(', ')}`);

@@ -23,6 +23,10 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/config", label: "Config", icon: Settings },
 ];
 
+export function visibleNavItems(followupsEnabled: boolean): NavItem[] {
+  return followupsEnabled ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.href !== "/followups");
+}
+
 export function isActivePath(href: string, pathname: string): boolean {
   return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }

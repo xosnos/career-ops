@@ -11,8 +11,16 @@
 import type { Application, InboxJob } from "@/lib/career-ops";
 import type { Job } from "@/components/jobs/job-store";
 import { normalizeTextKey } from "@/lib/core/normalize-text-key.mjs";
+import { normalizeMemoryFact } from "@/lib/memory-fact.mjs";
 import { coercePersonalization, SECTIONS } from "@/lib/personalization.mjs";
 import { formatBatchSpendConfirmation, requiresBatchSpendConfirmation } from "@/lib/run-cost-estimate.mjs";
+
+/** Tracker numbers compare numerically, so "007" finds row 7. */
+function applicationByNumber<T extends { n: string }>(apps: T[], n: string): T | undefined {
+  if (!/^\d+$/.test(n)) return undefined;
+  const target = Number(n);
+  return apps.find((a) => Number(a.n) === target);
+}
 
 export const BATCH_CAP = 12; // hard ceiling on a single fan-out
 
@@ -42,7 +50,7 @@ export type ActionCtx = {
   jobForUrl: (url: string) => Job | undefined; // skip-if-done / retry logic
   estimateCost?: (kind: string, count: number) => { tokens?: number; usd?: number };
   rememberFact: (fact: string) => void;
-  writeStatus: (n: string, status: string) => void; // UPDATE-only writeback via /api/status
+  writeStatus: (n: string, status: string) => void | Promise<void>; // UPDATE-only writeback via /api/status
   setApplyField: (idOrLabel: string, value: string) => void; // edit an apply-proxy answer
   startApply: (url: string) => void; // open the apply form-proxy for a posting URL
   applyExplore?: (patch: Record<string, unknown>, opts?: { merge?: boolean; run?: boolean }) => void; // build a FREE discovery search
@@ -84,7 +92,8 @@ export type DoneInfo = { jobIds?: string[]; batchId?: string; note?: string };
 export type DispatchResult =
   | ({ status: "done" } & DoneInfo)
   | { status: "ignored"; note?: string }
-  | { status: "confirm"; summary: string; run: () => DoneInfo };
+  | { status: "confirm"; summary: string; statusChange?: undefined; run: () => DoneInfo }
+  | { status: "confirm"; summary: string; statusChange: { n: string; status: string }; run: () => Promise<DoneInfo> };
 
 // ── helpers ──────────────────────────────────────────────────────────────
 const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
@@ -98,6 +107,9 @@ function isAllowedPath(p: string): boolean {
   if (/^(https?:)?\/\//i.test(p)) return false;
   const path = p.split(/[?#]/)[0];
   if (path === "/") return true;
+  // The apply checklist is the one two-segment route. A wider pattern would
+  // also allow /explore/:x/apply and similar paths this app does not have.
+  if (/^\/pipeline\/[^/]+\/apply$/.test(path)) return true;
   return /^\/(explore|pipeline|portals|analytics|cv|config|apply|jobs)(\/[^/]+)?$/.test(path);
 }
 
@@ -251,7 +263,7 @@ const ACTIONS: Record<string, ActionDef> = {
     run: (raw, ctx) => {
       const n = String(raw.n ?? "").trim();
       if (!n) return { status: "ignored", note: "need an application #" };
-      const app = ctx.applications.find((a) => a.n === n);
+      const app = applicationByNumber(ctx.applications, n);
       const id = ctx.startJob({ title: `CV PDF · ${app?.company ?? `#${n}`}`, subtitle: "tailored CV", kind: "pdf", input: n, page: `/pipeline/${n}` });
       return { status: "done", jobIds: id ? [id] : [] };
     },
@@ -264,13 +276,14 @@ const ACTIONS: Record<string, ActionDef> = {
       const status = String(raw.status ?? "").trim();
       const canon = CANON_STATUS.find((s) => s.toLowerCase() === status.toLowerCase());
       if (!n || !canon) return { status: "ignored", note: "need an application # and a canonical status" };
-      const app = ctx.applications.find((a) => a.n === n);
+      const app = applicationByNumber(ctx.applications, n);
       const label = app ? `${app.company} · ${app.role}` : `#${n}`;
       return {
         status: "confirm",
         summary: `Mark ${label} → ${canon}?`,
-        run: () => {
-          ctx.writeStatus(n, canon);
+        statusChange: { n, status: canon },
+        run: async () => {
+          await ctx.writeStatus(n, canon);
           return { note: `Marked #${n} as ${canon}.` };
         },
       };
@@ -301,10 +314,16 @@ const ACTIONS: Record<string, ActionDef> = {
   remember: {
     sideEffect: "write",
     run: (raw, ctx) => {
-      const fact = raw.fact;
-      if (!isStr(fact)) return { status: "ignored" };
-      ctx.rememberFact(String(fact).trim());
-      return { status: "done" };
+      const fact = isStr(raw.fact) ? normalizeMemoryFact(raw.fact) : "";
+      if (!fact) return { status: "ignored" };
+      return {
+        status: "confirm",
+        summary: `Save to your profile (modes/_profile.md): "${fact}"?`,
+        run: () => {
+          ctx.rememberFact(fact);
+          return {};
+        },
+      };
     },
   },
 

@@ -116,8 +116,9 @@ export function spawnGeneratePdf({ spawnFn, execPath, root, html, finalPdf, form
  * JSON stdout when present (mark-pdf-ready.mjs prints a JSON payload even on
  * a failure exit when --json is passed) so a caller can surface the specific
  * reason (not-found / ambiguous / lock-timeout / ...) rather than raw stderr.
+ * `code` is the exit code, or null when the child never started.
  * @param {{spawnFn: Function, execPath: string, root: string, reportNum: string}} args
- * @returns {Promise<{ok: boolean, data: object | null, stderr: string}>}
+ * @returns {Promise<{ok: boolean, code: number | null, data: {error?: string} | null, stderr: string}>}
  */
 export function markTrackerReady({ spawnFn, execPath, root, reportNum }) {
   return new Promise((resolve) => {
@@ -129,9 +130,9 @@ export function markTrackerReady({ spawnFn, execPath, root, reportNum }) {
     child.on("close", (code) => {
       let data = null;
       try { data = JSON.parse(stdout); } catch { /* not JSON, or exited before printing any */ }
-      resolve({ ok: code === 0, data, stderr: stderr.trim() });
+      resolve({ ok: code === 0, code, data, stderr: stderr.trim() });
     });
-    child.on("error", (e) => resolve({ ok: false, data: null, stderr: `mark-pdf-ready.mjs failed to start: ${e.message}` }));
+    child.on("error", (e) => resolve({ ok: false, code: null, data: null, stderr: `mark-pdf-ready.mjs failed to start: ${e.message}` }));
   });
 }
 
@@ -165,6 +166,20 @@ export function cleanupPdfScratch(scratchDir, prefix) {
 }
 
 /**
+ * Keep the rendered HTML beside its PDF. The CV Studio edits that HTML, and
+ * the scratch copy is deleted right after the render.
+ * @param {{html: string, finalPdf: string}} pdfPaths
+ * @param {string[]} warnings
+ */
+export function keepTailoredHtml(pdfPaths, warnings) {
+  try {
+    fs.copyFileSync(pdfPaths.html, pdfPaths.finalPdf.replace(/\.pdf$/i, ".html"));
+  } catch (err) {
+    warnings.push(`PDF rendered, but its HTML was not kept for the CV Studio: ${err.message}`);
+  }
+}
+
+/**
  * @typedef {Object} RenderFailedResult
  * @property {"render-failed"} kind
  * @property {string} error
@@ -192,6 +207,7 @@ export async function renderAndMarkPdf({ spawnFn, execPath, root, pdfPaths, form
   const warnings = [];
 
   const render = await spawnGeneratePdf({ spawnFn, execPath, root, html: pdfPaths.html, finalPdf: pdfPaths.finalPdf, format, reportNum });
+  if (render.ok) keepTailoredHtml(pdfPaths, warnings);
   cleanupPdfScratch(path.dirname(pdfPaths.html), `cv-web-${reportNum}.`);
 
   if (!render.ok) {

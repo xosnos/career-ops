@@ -1,8 +1,9 @@
 import path from "node:path";
 import * as yaml from "js-yaml";
-import { careerOpsRoot } from "@/lib/career-ops";
+import { careerOpsRoot, portalsConfigPath } from "@/lib/career-ops";
 import { atomicWriteWithBackup } from "@/lib/core/safe-write";
 import { loadPortalsDocument, mergePortalFilters, PortalsConfigError } from "@/lib/portals-config.mjs";
+import { readJsonObject } from "@/lib/json-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,17 +15,13 @@ export const dynamic = "force-dynamic";
 // (setProfile/setPortals). This loads the first home scan after role confirmation.
 
 export async function POST(req: Request) {
-  let body: { roles?: string[]; location?: string[] };
-  try {
-    body = (await req.json()) as { roles?: string[]; location?: string[] };
-  } catch {
-    return Response.json({ error: "bad json" }, { status: 400 });
-  }
+  const body = await readJsonObject<{ roles?: string[]; location?: string[] }>(req);
+  if (!body) return Response.json({ error: "bad json" }, { status: 400 });
   const roles = (Array.isArray(body.roles) ? body.roles : []).map((r) => String(r).trim()).filter(Boolean).slice(0, 24);
   if (roles.length === 0) return Response.json({ error: "no roles" }, { status: 400 });
 
   const root = careerOpsRoot();
-  const file = path.join(root, "portals.yml");
+  const file = portalsConfigPath(root);
   let doc: Record<string, unknown>;
   try {
     ({ doc } = loadPortalsDocument(file, path.join(root, "templates", "portals.example.yml")));

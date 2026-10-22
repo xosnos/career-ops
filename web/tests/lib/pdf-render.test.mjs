@@ -109,6 +109,7 @@ test("markTrackerReady: clean exit with JSON stdout -> ok:true, data parsed", as
 
   // Then it reports ok:true with the parsed payload
   assert.equal(result.ok, true);
+  assert.equal(result.code, 0);
   assert.deepEqual(result.data, { changed: true, num: 5, company: "Acme" });
 });
 
@@ -122,6 +123,7 @@ test("markTrackerReady: failure exit with parseable --json error -> data.error a
 
   // Then it reports ok:false with the specific error available for callers to surface
   assert.equal(result.ok, false);
+  assert.equal(result.code, 2);
   assert.equal(result.data?.error, "No tracker row links report #5");
 });
 
@@ -221,6 +223,7 @@ test("cleanupPdfScratch: a single file's removal failure logs but does not throw
 // ── renderAndMarkPdf ──
 
 function makePdfPaths(dir, reportNum) {
+  mkdirSync(join(dir, "output"), { recursive: true });
   return {
     html: join(dir, `cv-web-${reportNum}.html`),
     finalPdf: join(dir, "output", `cv-jane-acme-2026-07-26.pdf`),
@@ -243,6 +246,7 @@ test("renderAndMarkPdf: happy path -> rendered with no warnings, scratch cleaned
     // Then it reports rendered with no warnings, and scratch is cleaned up
     assert.deepEqual(result, { kind: "rendered", warnings: [] });
     assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith("cv-web-1.")), []);
+    assert.equal(readFileSync(join(dir, "output", "cv-jane-acme-2026-07-26.html"), "utf8"), "<html></html>", "the CV Studio's source HTML is kept beside the PDF");
     // ...and the format actually reached generate-pdf.mjs. The argv was only
     // inspected on the failure path, so a hardcoded or defaulted format would pass
     // while every US/Canada CV rendered on the wrong page size.
@@ -271,6 +275,7 @@ test("renderAndMarkPdf: generate-pdf.mjs fails -> render-failed, mark-pdf-ready 
     assert.deepEqual(result, { kind: "render-failed", error: "Refusing to write the PDF outside the project directory" });
     assert.equal(calls.length, 1);
     assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith("cv-web-3.")), []);
+    assert.deepEqual(readdirSync(join(dir, "output")), [], "a failed render keeps no HTML");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

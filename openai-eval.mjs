@@ -30,7 +30,7 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { getCareerOpsRoot, getProfilePath } from './path-resolver.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
 import { outputLanguageInstruction, parseOutputLanguage } from './profile-language.mjs';
@@ -62,7 +62,8 @@ const PATHS = {
   shared:  join(ROOT, 'modes', '_shared.md'),
   oferta:  join(ROOT, 'modes', 'oferta.md'),
   cv:        join(DATA_ROOT, 'cv.md'),
-  profileYml: join(DATA_ROOT, 'config', 'profile.yml'),
+  profileYml: getProfilePath(),
+  profile:    join(DATA_ROOT, 'modes', '_profile.md'),
   reports:    join(DATA_ROOT, 'reports'),
   // CAREER_OPS_ADDITIONS mirrors merge-tracker.mjs:43. Writing under DATA_ROOT
   // regardless would drop the addition somewhere the merge it instructs never
@@ -250,6 +251,7 @@ const sharedContext = readFile(PATHS.shared,     'modes/_shared.md');
 const ofertaLogic   = readFile(PATHS.oferta,     'modes/oferta.md');
 const cvContent     = readFile(PATHS.cv,         'cv.md');
 const profileYml    = readFile(PATHS.profileYml, 'config/profile.yml');
+const profileContent = readFile(PATHS.profile,   'modes/_profile.md');
 const languageInstruction = outputLanguageInstruction(parseOutputLanguage(profileYml));
 
 // ---------------------------------------------------------------------------
@@ -260,6 +262,7 @@ const { contextBody, budgetReport } = buildBudgetedPrompt({
   ofertaContent: ofertaLogic,
   cvContent,
   profileYml,
+  profileContent,
   jdText,
   noCompress,
   modelName,

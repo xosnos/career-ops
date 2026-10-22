@@ -56,9 +56,10 @@ import { readFileSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import { findColumn } from './process-quality.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import { normalizeCompanyName, companySimilarity } from './invite-match.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
@@ -110,7 +111,7 @@ const STATES_FILE = join(CAREER_OPS, 'templates/states.yml');
  * @returns {{ order: string[], terminal: Set<string>, labels: Record<string,string> }}
  */
 export function loadLifecycle(statesPath) {
-  const doc = yaml.load(readFileSync(statesPath, 'utf-8'));
+  const doc = loadYaml(readFileSync(statesPath, 'utf-8'));
   if (!doc || !Array.isArray(doc.states)) {
     throw new Error(`Malformed states file at ${statesPath}: expected a top-level "states" list`);
   }
@@ -292,13 +293,6 @@ export function parseActiveInterviewsWithLines(content) {
 function loadActiveInterviewsWithLines(interviewsFile) {
   if (!existsSync(interviewsFile)) return [];
   return parseActiveInterviewsWithLines(readFileSync(interviewsFile, 'utf-8'));
-}
-
-// Case-insensitive column lookup — same rationale as process-quality.mjs's
-// findColumn: header wording ("Notes" vs "notes") is candidate-editable.
-function findColumn(row, name) {
-  const key = Object.keys(row || {}).find(k => k.trim().toLowerCase() === name);
-  return key ? String(row[key] ?? '') : '';
 }
 
 // --- git blame timestamp (Tier 2 tiebreak) ---

@@ -500,7 +500,8 @@ const twoPassManifestChecks = [
   },
   {
     name: 'apply commit is scoped to expanded update files, not directories (#3504)',
-    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.expandedPathsToStage\)/,
+    // Through commitPathspecs, which keeps the list off argv (#5103).
+    pattern: /commitPathspecs\(`chore: auto-update system files to v\$\{remote\}`,\s*expandedPathsToStage\)/,
   },
   {
     name: 'rollback expands backup and target manifests to safe concrete tree files',
@@ -517,8 +518,8 @@ const twoPassManifestChecks = [
   {
     name: 'rollback commit is scoped to concrete restore/removal files under literal pathspecs (#3504)',
     // An index commit only when nothing unrelated is staged; otherwise scoped
-    // to the staged rollback paths. Never the full concrete list as one argv.
-    pattern: /stagedPathsOutside\(concreteRollbackPaths\)\.length === 0\)\s*\{\s*git\('commit',\s*'-m',\s*message\);\s*\}\s*else\s*\{\s*git\('--literal-pathspecs',\s*'commit',\s*'-m',\s*message,\s*'--',\s*\.\.\.stagedRollbackPaths\)/,
+    // to the staged rollback paths, read from a file. Never a path list on argv.
+    pattern: /const scoped = stagedPathsOutside\(concreteRollbackPaths\)\.length > 0;[\s\S]{0,40}if \(!scoped\)\s*\{\s*git\('commit',\s*'-m',\s*message\);\s*\}\s*else\s*\{\s*commitPathspecs\(message,\s*stagedRollbackPaths,\s*\{\s*literal:\s*true\s*\}\)/,
   },
   {
     name: 'apply captures uncommitted work via git stash create before branching (#915)',
@@ -589,8 +590,10 @@ const twoPassManifestChecks = [
     // thrown probe, a timeout or a permission error must rethrow, not report
     // success (#1998). The catch must NOT set `absentUpstream` any other way:
     // an inline `catch { absentUpstream = true }` is exactly the regression.
+    // The rethrow sits in a block because the paths already checked out are
+    // restored first; the branch must still end in `throw err`.
     name: 'the checkout catch derives absentUpstream only from probeAbsentUpstream (#1998, #3824)',
-    pattern: /const absentUpstream = probeAbsentUpstream\(spec, targetCommit\);\s*if \(!checkoutErrorIsBenign\(err, \{ absentUpstream, preservedState \}\)\) throw err;/,
+    pattern: /const absentUpstream = probeAbsentUpstream\(spec, targetCommit\);\s*if \(!checkoutErrorIsBenign\(err, \{ absentUpstream, preservedState \}\)\) \{[\s\S]{0,1200}?\n\s*throw err;\s*\n\s*\}/,
   },
   {
     name: 'the checkout catch never assigns absentUpstream = true directly (#1998 regression)',
@@ -617,8 +620,10 @@ const twoPassManifestChecks = [
     pattern: /if \(protectedPaths\.has\(file\)\) continue;/,
   },
   {
-    name: 'revertPaths receives the pre-update snapshot at its call sites (#2015)',
-    pattern: /revertPaths\(updated, initialStatusPaths\)/,
+    // The preserved files ride along: a bare `git checkout HEAD -- <dir>` would
+    // reset an uncommitted edit the update had kept out of its checkout (#2337).
+    name: 'revertPaths receives the pre-update snapshot and the preserved files at its call sites (#2015)',
+    pattern: /revertPaths\(updated, initialStatusPaths, \{ exclude: preservedPaths \}\)/,
   },
   {
     // -z output is NUL-delimited/unquoted, so a path with spaces or newlines is

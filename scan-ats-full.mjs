@@ -52,7 +52,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSyn
 import { createHash } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { renameSyncWithRetry } from './tracker-utils.mjs';
 
 import { makeHttpCtx, fetchJson } from './providers/_http.mjs';
@@ -1135,7 +1135,7 @@ async function main() {
     console.error('Error: portals.yml not found. Run onboarding first — the reverse scan reuses its title_filter/location_filter.');
     process.exit(1);
   }
-  const config = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
+  const config = loadYaml(readFileSync(PORTALS_PATH, 'utf-8'));
   const fullTitleFilterConfig = resolveTitleFilterConfig(config);
   // title_filter_overrides is independent of title_filter_full: it broadens
   // the net for specific companies on top of whichever title filter config

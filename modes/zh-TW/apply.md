@@ -1,6 +1,6 @@
 # 模式: apply — 即時表單填寫助理
 
-當求職者在 Chrome 瀏覽器中填寫職缺投遞表單時，這個即時助理能讀取當前畫面內容、調出該職缺的歷史評估報告，並為表單中每一個開放式或選擇式問題產生個人化的高品質回答草稿。
+當求職者在本專案啟動的 Playwright 瀏覽器中填寫職缺投遞表單時，這個即時助理能讀取當前畫面內容、調出該職缺的歷史評估報告，並為表單中每一個開放式或選擇式問題產生個人化的高品質回答草稿。
 
 ## 執行需求
 
@@ -10,7 +10,7 @@
 ## 即時工作流程
 
 ```text
-1. 擷取 (DETECT)    → 讀取當前 Chrome 作用中分頁（截圖／URL／網頁標題）
+1. 擷取 (DETECT)    → 用本專案的 Playwright 瀏覽器開啟職缺頁面
 2. 辨識 (IDENTIFY)  → 從頁面中擷取公司名稱與職缺名稱
 3. 搜尋 (SEARCH)    → 比對 reports/ 目錄下已儲存的評估報告
 4. 載入 (LOAD)      → 讀取對應的評估報告及 H 區的擬答草稿（若存在）
@@ -20,11 +20,16 @@
 8. 呈現 (PRESENT)   → 輸出可直接複製貼上的格式化文字
 ```
 
+## Scope
+
+Follow the Scope section in `modes/apply.md`. Run `node apply-scope.mjs root` and stay inside the directories it prints. Launch with `node apply-scope.mjs launch-options`. Do not read `DevToolsActivePort` or attach to an existing browser. Do not submit the form.
+
+
 ---
 
 ## 步驟 1 — 擷取當前職缺表單
 
-**使用 Playwright**：對作用中頁面進行快照截圖，並讀取網頁標題、URL 以及頁面主體文字。
+**使用 Playwright**：執行 `node apply-scope.mjs launch-options`，在該視窗開啟職缺頁面，並讀取標題、URL 和頁面正文。
 
 **不使用 Playwright**：請求職者執行以下其中一項：
 - 傳送當前表單頁面的螢幕截圖（Read 工具能辨識並分析圖片）。
@@ -108,7 +113,7 @@
 ## 步驟 6 — 投遞後動作
 
 當求職者確認已經成功按下「送出應徵／投遞」後，執行以下收尾與建檔工作：
-1. 使用規範的 CLI 將該職缺狀態更新為 `Applied`：`node set-status.mjs <report#> Applied`（不要手動編輯 `data/applications.md` 表格）。
+1. 使用規範的 CLI 將該職缺狀態更新為 `Applied`：`node set-status.mjs --report <report#> Applied`（不要手動編輯 `data/applications.md` 表格）。
 2. 將最終實際送出的表單回答歸檔，並更新到該報告的維度 H 區塊中，方便後續面試對照。
 3. 建議下一步行動：引導求職者使用 `/career-ops contacto` 指令，產生直達 LinkedIn 招募負責人的開發話術。
 

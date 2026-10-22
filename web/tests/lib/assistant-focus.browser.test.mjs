@@ -86,6 +86,7 @@ test("Assistant keyboard continuation, semantic context and modeless behavior", 
   await page.keyboard.press("Shift+Enter");
   await page.keyboard.type("Second line");
   assert.equal(await composer(page).inputValue(), "First line\nSecond line");
+  await until(() => page.getByRole("button", { name: "Send", exact: true }).isEnabled());
   await page.keyboard.press("Enter");
   await until(() => requests.length === 1);
   assert.equal(await focused(composer(page)), true);

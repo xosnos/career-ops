@@ -29,8 +29,10 @@ import { getCareerOpsRoot } from './path-resolver.mjs';
 import { flagValue, validateFlags } from './lib/cli-flags.mjs';
 import { withPipelineLock, LockTimeoutError } from './pipeline-lock.mjs';
 import { writeFileAtomic } from './tracker-utils.mjs';
+import { sectionKind, processedHeadingFor } from './lib/pipeline-sections.mjs';
 
 const CAREER_OPS = getCareerOpsRoot();
+const CODEBASE_ROOT = dirname(fileURLToPath(import.meta.url));
 
 const KNOWN_FLAGS = ['--dry-run', '--pipeline', '--state', '--help', '-h'];
 const VALUE_FLAGS = ['--pipeline', '--state'];
@@ -45,15 +47,15 @@ validateFlags(args, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS, requireOperan
 
 const DRY_RUN = args.includes('--dry-run');
 
-// Constrain user-supplied --state/--pipeline paths to the repository tree, so a
-// crafted path cannot read from or overwrite files outside the project.
+// Pipeline writes stay inside the data root. Batch state can also live in the
+// code checkout, where batch-runner.sh keeps it under batch/.
 // Symlinks are resolved first (realpathSync) so an in-repo symlink cannot
 // smuggle the real target outside the tree past a purely lexical check.
-function resolveInsideRepo(inputPath, fallbackPath, flag) {
+function resolveInsideRepo(inputPath, fallbackPath, flag, roots = [CAREER_OPS]) {
   const abs = resolve(inputPath || fallbackPath);
-  let repoReal, targetReal;
+  let repoRoots, targetReal;
   try {
-    repoReal = realpathSync(CAREER_OPS);
+    repoRoots = roots.map(root => realpathSync(root));
     // The target may not exist yet (e.g. a fresh --pipeline path); fall back to
     // its parent directory so the symlink-resolved boundary check still applies.
     targetReal = existsSync(abs) ? realpathSync(abs) : realpathSync(dirname(abs));
@@ -61,8 +63,10 @@ function resolveInsideRepo(inputPath, fallbackPath, flag) {
     console.error(`Invalid ${flag}: cannot resolve path (${abs})`);
     process.exit(1);
   }
-  const rel = relative(repoReal, targetReal);
-  if (rel.startsWith('..') || isAbsolute(rel)) {
+  if (!repoRoots.some(root => {
+    const rel = relative(root, targetReal);
+    return !rel.startsWith('..') && !isAbsolute(rel);
+  })) {
     console.error(`Invalid ${flag}: path must stay inside the repository (${abs})`);
     process.exit(1);
   }
@@ -79,7 +83,7 @@ const defaultPipeline = existsSync(join(CAREER_OPS, 'data/pipeline.md'))
   ? join(CAREER_OPS, 'data/pipeline.md')
   : join(CAREER_OPS, 'pipeline.md');
 const PIPELINE_FILE = resolveInsideRepo(flagValue(args, '--pipeline'), defaultPipeline, '--pipeline');
-const STATE_FILE = resolveInsideRepo(flagValue(args, '--state'), join(CAREER_OPS, 'batch/batch-state.tsv'), '--state');
+const STATE_FILE = resolveInsideRepo(flagValue(args, '--state'), join(CODEBASE_ROOT, 'batch/batch-state.tsv'), '--state', [CODEBASE_ROOT, CAREER_OPS]);
 const REPORTS_DIR = join(CAREER_OPS, 'reports');
 
 // ---- guards ----
@@ -99,11 +103,14 @@ for (const line of readFileSync(STATE_FILE, 'utf-8').split(/\r?\n/)) {
   if (!line.trim() || line.startsWith('id\t')) continue;
   const c = line.split('\t');
   if (c.length < 7) continue;
-  const [, url, status, , , reportNum, score] = c;
-  // "completed" and "skipped" (below --min-score) both produced a report.
+  const [, url, status, , , reportNum, score, error] = c;
+  // "completed" and "skipped" (below --min-score) both produced a report. A
+  // dealbreaker skip (batch-prompt.md Step 1.6) is finished without one: its
+  // SKIP tracker row is the record.
   if (status !== 'completed' && status !== 'skipped') continue;
   if (!url || !url.trim()) continue;
-  DONE.set(url.trim(), { reportNum: (reportNum || '').trim(), score: (score || '').trim() });
+  const dealbreaker = status === 'skipped' && (error || '').startsWith('dealbreaker:');
+  DONE.set(url.trim(), { reportNum: (reportNum || '').trim(), score: (score || '').trim(), dealbreaker });
 }
 
 if (DONE.size === 0) {
@@ -162,15 +169,17 @@ function resolveScore(stateScore, reportFile) {
   return 'N/A';
 }
 
+// The batch report header names the PDF path when one was generated, and
+// otherwise says "not generated" in the user's output language. Only the path
+// is the same in every language.
 function resolvePdf(reportFile) {
   const rep = readReportField(reportFile, 'PDF');
-  if (!rep) return '❌';
-  return /not generated/i.test(rep) ? '❌' : '✅';
+  // A filename ending in .pdf (path or basename), not a bare ".pdf" mention in
+  // a localized "not generated" note.
+  return rep && (/[^\s]+\.pdf\b/i.test(rep) || rep.includes('✅')) ? '✅' : '❌';
 }
 
 // ---- parse pipeline.md ----
-const PENDING_RE = /^##\s+(Pendientes|Pending)\s*$/i;
-const PROCESSED_RE = /^##\s+(Procesadas|Processed)\s*$/i;
 const SECTION_RE = /^##\s+/;
 const PENDING_ITEM_RE = /^- \[ \]\s+/;
 
@@ -190,8 +199,9 @@ function reconcile() {
 
   let pendStart = -1, procStart = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (pendStart < 0 && PENDING_RE.test(lines[i])) pendStart = i;
-    else if (procStart < 0 && PROCESSED_RE.test(lines[i])) procStart = i;
+    const kind = sectionKind(lines[i]);
+    if (pendStart < 0 && kind === 'pending') pendStart = i;
+    else if (procStart < 0 && kind === 'processed') procStart = i;
   }
 
   if (pendStart < 0) {
@@ -237,6 +247,15 @@ function reconcile() {
       // Already recorded in Procesadas — just drop the stale Pendientes copy.
       removeIdx.add(i);
       moved.push({ url, role: '(already in Procesadas)', dup: true });
+      continue;
+    }
+
+    if (done.dealbreaker) {
+      const [, company = '', role = ''] = body.split('|').map(s => s.trim());
+      movedProcLines.push(`- [x] SKIP | ${url} | ${company} | ${role} | N/A | PDF ❌`);
+      moved.push({ url, company, role, num: '-', score: 'SKIP, dealbreaker' });
+      procUrls.add(url);
+      removeIdx.add(i);
       continue;
     }
 
@@ -290,9 +309,8 @@ function reconcile() {
   // No Procesadas section yet — create one at the end of the file, matching the
   // language the pending section header already uses.
   if (procStart < 0 && movedProcLines.length > 0) {
-    const processedHeader = /Pending/i.test(lines[pendStart]) ? '## Processed' : '## Procesadas';
     if (out.length && out[out.length - 1].trim() !== '') out.push('');
-    out.push(processedHeader, '', ...movedProcLines);
+    out.push(processedHeadingFor(lines[pendStart]), '', ...movedProcLines);
   }
 
   const newContent = out.join('\n');
@@ -300,7 +318,7 @@ function reconcile() {
   const newCount = (() => {
     let n = 0, inPend = false;
     for (const l of out) {
-      if (PENDING_RE.test(l)) { inPend = true; continue; }
+      if (sectionKind(l) === 'pending') { inPend = true; continue; }
       if (SECTION_RE.test(l)) { inPend = false; continue; }
       if (inPend && PENDING_ITEM_RE.test(l)) n++;
     }

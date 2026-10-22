@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NOTES_START, NOTES_END, profilePath } from "./profile-memory.mjs";
-import { renderSection, scanHeadings, sectionState, SECTIONS } from "./personalization.mjs";
+import { renderSection } from "./personalization.mjs";
 
 /**
  * Thrown when a write cannot be proven safe: the file's section boundaries are
@@ -31,7 +31,8 @@ export class UnsureProfileParseError extends Error {
  * its own section, so the notes stay last the way rememberFact() expects.
  * Throws UnsureProfileParseError rather than guess at a boundary.
  */
-export function mergeSections(existingMd, rendered) {
+export function mergeSections(existingMd, rendered, core) {
+  const { scanHeadings, SECTIONS } = core;
   // Contract: bodies arrive already rendered (renderSection). Fail loudly here
   // rather than let an array or object stringify into the user's file.
   for (const [id, body] of Object.entries(rendered ?? {})) {
@@ -133,9 +134,9 @@ function readTemplate(codeRoot) {
  * @param {string} dataRoot career-ops home, i.e. careerOpsRoot()
  * @param {string} codeRoot engine checkout, i.e. resolveCodeRoot()
  */
-export function readPersonalizationState(dataRoot, codeRoot) {
+export function readPersonalizationState(dataRoot, codeRoot, core) {
   const user = readExact(profilePath(dataRoot));
-  return { exists: user !== null, sections: sectionState(user ?? "", readTemplate(codeRoot)) };
+  return { exists: user !== null, sections: core.sectionState(user ?? "", readTemplate(codeRoot)) };
 }
 
 /**
@@ -145,17 +146,17 @@ export function readPersonalizationState(dataRoot, codeRoot) {
  * is merged, never replaced. Throws before writing on anything it cannot read
  * or is not sure how to splice.
  *
- * @param {{ dataRoot: string, codeRoot: string, patch: Record<string, unknown>, dryRun?: boolean, write: (file: string, content: string) => unknown }} opts
+ * @param {{ dataRoot: string, codeRoot: string, patch: Record<string, unknown>, dryRun?: boolean, write: (file: string, content: string) => unknown, core: { scanHeadings: Function, SECTIONS: Array<{ id: string, heading: string }> } }} opts
  *   `patch` is already coerced (coercePersonalization); `write` is atomicWriteWithBackup.
  * @returns {{ ids: string[], merged: string }}
  */
-export function savePersonalization({ dataRoot, codeRoot, patch, dryRun = false, write }) {
+export function savePersonalization({ dataRoot, codeRoot, patch, dryRun = false, write, core }) {
   const ids = Object.keys(patch);
   const file = profilePath(dataRoot);
   const base = readExact(file) ?? readTemplate(codeRoot);
   const rendered = {};
   for (const id of ids) rendered[id] = renderSection(id, patch[id]);
-  const merged = mergeSections(base, rendered);
+  const merged = mergeSections(base, rendered, core);
   if (!dryRun) write(file, merged);
   return { ids, merged };
 }

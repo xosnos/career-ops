@@ -8,6 +8,8 @@ import { basename, join, dirname, resolve, sep } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { isNestedCheckout, trackedFiles } from '../lib/mjs-files.mjs';
 import { localToday } from '../lib/local-today.mjs';
+import { getCareerOpsRoot } from '../path-resolver.mjs';
+import { describeDrift, diffSnapshots, snapshotDataRoot } from './data-root-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = join(__dirname, '..');   // repo root (tests/ lives one level down)
@@ -29,6 +31,153 @@ export const NODE = process.execPath;
 // overwritten by a later .env load (#4707 did the same for one test and
 // CAREER_OPS_PIPELINE). A test that needs the override sets its own.
 process.env.CAREER_OPS_TRACKER = '';
+
+// The same rule for the data root itself, which is where everything else a
+// script reads and writes is resolved from (#5113). Left alone, the suite ran
+// against whatever the shell pointed at: with CAREER_OPS_ROOT exported the way
+// the README suggests, the script smoke tests appended a fixture row to the
+// developer's real data/assessments.tsv on every run, and with nothing
+// exported, three suites overwrote live files in the checkout's own data/ and
+// restored them from memory — so an interrupted run left a three-row fixture
+// where the tracker had been, in a directory git does not track.
+//
+// So the suite gets a data root of its own. Pinned through CAREER_OPS_ROOT
+// because that outranks both CAREER_OPS_DATA_DIR and the `.career-ops-data`
+// marker (path-resolver.mjs), and set here for the reason the tracker override
+// is cleared here: the runner and every child it spawns inherit it, and a suite
+// run on its own is covered as well. A test that needs a particular root pins
+// its own, in its child's env or around its own import.
+//
+// One directory per run, not per process. The process that creates it exports
+// it as CAREER_OPS_TEST_DATA_ROOT; a child that loads these helpers finds that
+// and joins the run's root rather than making another, and only the creator
+// removes it.
+const SANDBOX_ENV = 'CAREER_OPS_TEST_DATA_ROOT';
+const SANDBOX_PREFIX = 'career-ops-test-data-';
+
+// The variable is inherited, so it is only as trustworthy as the shell it came
+// from: a stale export naming a real directory would make this process a
+// guest in it — fixtures written there, no snapshot, no drift check. Join only
+// what these helpers could have made: a directory of that name, directly under
+// the OS temp directory.
+function isRunSandbox(path) {
+  try {
+    const real = realpathSync(path);
+    return statSync(real).isDirectory()
+      && dirname(real) === realpathSync(tmpdir())
+      && basename(real).startsWith(SANDBOX_PREFIX);
+  } catch {
+    return false;
+  }
+}
+
+const inheritedSandbox = process.env[SANDBOX_ENV]?.trim();
+const ownsSandbox = !(inheritedSandbox && isRunSandbox(inheritedSandbox));
+
+/**
+ * The data root the developer's own commands resolve to, read before it is
+ * overridden below. Null in a child of the run: the process that owns the
+ * sandbox is the one that answers for the real root.
+ */
+export const REAL_DATA_ROOT = ownsSandbox ? getCareerOpsRoot() : null;
+const realRootBefore = ownsSandbox ? snapshotDataRoot(REAL_DATA_ROOT, ROOT) : null;
+
+/** The scratch data root every script resolves to while the suite runs. */
+export const SANDBOX_DATA_ROOT = ownsSandbox
+  ? realpathSync(mkdtempSync(join(tmpdir(), SANDBOX_PREFIX)))
+  : realpathSync(inheritedSandbox);
+
+/**
+ * Point the data root back at the suite's sandbox.
+ *
+ * Called when these helpers load, and again by any test that had to move or
+ * unset the variable in-process: `delete process.env.CAREER_OPS_ROOT` in a
+ * `finally` does not restore anything, it hands every later suite in the same
+ * process the developer's real root.
+ *
+ * @returns {void}
+ */
+export function pinSandboxDataRoot() {
+  process.env[SANDBOX_ENV] = SANDBOX_DATA_ROOT;
+  process.env.CAREER_OPS_ROOT = SANDBOX_DATA_ROOT;
+  // Blanked, not deleted, for the same reasons as CAREER_OPS_TRACKER above.
+  process.env.CAREER_OPS_DATA_DIR = '';
+}
+pinSandboxDataRoot();
+
+/**
+ * Environment for a child that runs a COPY of the scripts as its own checkout.
+ *
+ * Many fixtures copy a script and path-resolver.mjs into a temp directory and
+ * expect the copy to treat that directory as its data root, which is what the
+ * resolver does when nothing overrides it. Something does now — the pin above —
+ * and a developer's exported CAREER_OPS_ROOT always did, so the expectation is
+ * stated in the child's env instead of assumed from the shell's.
+ *
+ * @param {Record<string, string>} [extra] - Further variables for the child.
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function ownRootEnv(extra = {}) {
+  return { ...process.env, CAREER_OPS_ROOT: '', CAREER_OPS_DATA_DIR: '', ...extra };
+}
+
+let realRootChecked = false;
+
+/**
+ * Compare the real data root with how the run found it.
+ *
+ * Answers once: finish() reports through the counters, and the exit hook
+ * below must not report the same paths a second time.
+ *
+ * @returns {string[]|null} Lines describing what changed, or null when nothing
+ *   did, the check already ran, or this process does not own the sandbox.
+ */
+export function realDataRootDrift() {
+  if (!ownsSandbox || realRootChecked) return null;
+  realRootChecked = true;
+  const drift = diffSnapshots(realRootBefore, snapshotDataRoot(REAL_DATA_ROOT, ROOT));
+  return drift.length > 0 ? describeDrift(REAL_DATA_ROOT, drift, ROOT) : null;
+}
+
+/**
+ * Make SIGINT and SIGTERM end the process through process.exit().
+ *
+ * Node's default for both is to die where it stands, which skips the 'exit'
+ * hook below — so the run most likely to have left something behind in the
+ * developer's data was the one run that never looked. Exiting through
+ * process.exit() runs the hook, and removes the scratch data root on the way.
+ *
+ * Opt-in, for the long-lived runner: a handler only runs between two turns of
+ * the event loop, so the caller has to be a process that yields.
+ *
+ * @returns {void}
+ */
+export function exitOnInterrupt() {
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+    process.on(signal, () => {
+      console.log(`\n  ⛔ interrupted (${signal}) — this is not a test result`);
+      process.exit(code);
+    });
+  }
+}
+
+if (ownsSandbox) {
+  // 'exit' also fires for process.exit(), so this covers a suite run on its
+  // own, which never reaches finish(), and a run ended by exitOnInterrupt().
+  process.on('exit', () => {
+    const drift = realDataRootDrift();
+    if (drift) {
+      console.log(`\n  ❌ ${drift.join('\n     ')}\n`);
+      // Keep a signal's own exit status; anything else becomes a failure.
+      if (!process.exitCode) process.exitCode = 1;
+    }
+    try {
+      _rmSync(SANDBOX_DATA_ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+      // Under the OS temp directory, which is reclaimed without us.
+    }
+  });
+}
 
 /**
  * A merge-tracker fixture must not consult the install's batch history.
@@ -172,6 +321,13 @@ export async function importSuiteContained(file, rel) {
     for (const line of String(err?.stack ?? '').split('\n').slice(1, 4)) {
       if (line.trim()) console.log(`      ${line.trim()}`);
     }
+  } finally {
+    // A suite that sealed git (sealProcessGitEnv) hands the environment back,
+    // so the suites after it in this process do not inherit the seal.
+    if (unsealGitEnv) {
+      unsealGitEnv();
+      unsealGitEnv = null;
+    }
   }
 }
 
@@ -195,6 +351,10 @@ export function finish() {
   // stay authoritative for inline assertions; this only adds a failure source
   // that was already being computed and thrown away.
   const runnerFailed = Boolean(process.exitCode);
+  // Before the summary, so a run that wrote to the developer's data cannot
+  // print "All tests passed" above the line that says it did (#5113).
+  const drift = realDataRootDrift();
+  if (drift) fail(drift.join('\n     '));
   console.log('\n' + '='.repeat(50));
   console.log(`📊 Results: ${passed} passed, ${failed} failed, ${warnings} warnings`
     + (runnerFailed ? ' — plus failures in a discovered node:test suite (see above)' : ''));
@@ -332,6 +492,14 @@ let lastFailure = null;
  *
  * @returns {{status: number|null, signal: string|null, stdout: string, stderr: string}|null}
  */
+// describeSpawn lives in helpers/describe-spawn.mjs and is re-exported here so
+// the 410 tests that already import from this file can reach it. It is a
+// SEPARATE module because importing this one is not free: the lines above set
+// process.env.CAREER_OPS_TRACKER, call pinSandboxDataRoot() and register an
+// 'exit' hook. A test that does not already depend on that must be able to
+// describe a failed child without inheriting it.
+export { describeSpawn } from './helpers/describe-spawn.mjs';
+
 export function lastRunFailure() {
   return lastFailure;
 }
@@ -1326,6 +1494,78 @@ export function hermeticGitRunner(dir, { stdio } = {}) {
   const options = { cwd: dir, encoding: 'utf-8', env, ...(stdio ? { stdio } : {}) };
   return (...args) => execFileSync('git', args, options).trim();
 }
+
+/**
+ * Seal THIS process's git environment, for a suite whose fixtures run git
+ * through something that inherits process.env rather than through
+ * `hermeticGitRunner`: the updater's own `gitIn` / `gitQuietIn` and the `*In`
+ * helpers built on them, a bare `execFileSync('git', ...)`, or a CLI spawned
+ * with the parent's environment. Those inherit the environment as a real
+ * install must, so a fixture built with them is only as isolated as the
+ * contributor's shell. With `tag.gpgSign = true` in ~/.gitconfig a lightweight
+ * `git tag` becomes a signed annotated tag with no message and git dies with
+ * "no tag message?"; with `commit.gpgSign = true` every fixture commit is
+ * signed with the contributor's own key, or fails where gpg cannot sign.
+ *
+ * Sealing the process rather than one runner is what reaches the git calls
+ * the code under test makes for itself. Call it before the suite's first git
+ * command; a later `process.env` override (an identity negative control, say)
+ * still applies on top and restores back to the seal.
+ *
+ * A suite run directly, under `node --test`, or by `test-all.mjs --jobs N` has
+ * a process of its own. The serial loop (`--jobs 1`, or a single matched file)
+ * imports the suite into test-all's process instead, so the seal records every
+ * variable it changes and `importSuiteContained` puts them back once the import
+ * settles, thrown or not. The suites after it see the environment they would
+ * have seen without it.
+ *
+ * The environment is `hermeticGitEnv`'s, so the runtime-layer pins come with
+ * it, and the variables that helper and `hermeticGitRunner` drop are deleted
+ * from process.env, not merely left uncopied. The repository-location names
+ * are matched without regard to case: Windows environment names are
+ * case-insensitive, so a `Git_Dir` would otherwise survive and still point git
+ * at another repository. The config path names a file that is never created:
+ * a missing global file is simply an empty one.
+ */
+export function sealProcessGitEnv() {
+  // One directory per process: the serial loop imports several sealing suites
+  // into one, and an exit listener each would add up.
+  if (!sealDir) {
+    const dir = mkdtempSync(join(tmpdir(), 'co-sealed-git-'));
+    process.on('exit', () => _rmSync(dir, { recursive: true, force: true }));
+    sealDir = dir;
+  }
+  const sealed = hermeticGitEnv(join(sealDir, 'gitconfig'));
+  const repoLocation = new Set(REPO_LOCATION_ENV);
+  for (const name of Object.keys(sealed)) {
+    if (repoLocation.has(name.toUpperCase())) delete sealed[name];
+  }
+  const changed = new Map();
+  for (const name of Object.keys(process.env)) {
+    if (!Object.hasOwn(sealed, name)) {
+      changed.set(name, process.env[name]);
+      delete process.env[name];
+    }
+  }
+  for (const [name, value] of Object.entries(sealed)) {
+    if (process.env[name] !== value && !changed.has(name)) changed.set(name, process.env[name]);
+    process.env[name] = value;
+  }
+  // A second seal in the same suite must not record the first one's values as
+  // the originals.
+  if (!unsealGitEnv) {
+    unsealGitEnv = () => {
+      for (const [name, value] of changed) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    };
+  }
+}
+
+/** Set while a seal is in force; `importSuiteContained` calls and clears it. */
+let unsealGitEnv = null;
+let sealDir = null;
 
 /**
  * Can a directory write-deny actually stop THIS process from creating a file?

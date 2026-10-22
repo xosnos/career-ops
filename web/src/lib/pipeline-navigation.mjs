@@ -21,3 +21,30 @@ export function pipelineQuery(params, search) {
   }
   return query.toString();
 }
+
+// INBOX (the triage queue) is the default tab; the rest filter the tracker.
+export const PIPELINE_TABS = /** @type {const} */ ([
+  "INBOX",
+  "ALL",
+  "EVALUATED",
+  "APPLIED",
+  "RESPONDED",
+  "ASSESSMENT",
+  "INTERVIEW",
+  "OFFER",
+  "HIRED",
+  "REJECTED",
+  "DISCARDED",
+  "SKIP",
+]);
+
+/**
+ * The tab a `?tab=` value selects. The server page and the client view both
+ * call this, so they agree on which tab shows the inbox.
+ * @param {string | string[] | null | undefined} raw
+ * @returns {(typeof PIPELINE_TABS)[number]}
+ */
+export function pipelineTab(raw) {
+  const value = String((Array.isArray(raw) ? raw[0] : raw) ?? "").toUpperCase();
+  return PIPELINE_TABS.find((t) => t === value) ?? "INBOX";
+}

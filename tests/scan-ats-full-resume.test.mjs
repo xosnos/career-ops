@@ -164,11 +164,11 @@ const { loadCheckpoint, checkpointCompatible } = mod;
 
 // loadCheckpoint: garbage and wrong-version files → null, never a throw.
 {
-  const { writeFileSync, mkdirSync, rmSync } = await import('node:fs');
-  // Anchored to ROOT, not CWD: run from anywhere else and a relative path would
-  // create — and then rmSync — a directory outside the project.
-  const dir = join(ROOT, 'data/cache/.test-checkpoint');
-  mkdirSync(dir, { recursive: true });
+  const { writeFileSync, mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  // A temp directory of its own. This used to be data/cache/.test-checkpoint
+  // under ROOT, which is the developer's data directory (#5113).
+  const dir = mkdtempSync(join(tmpdir(), 'co-scan-checkpoint-'));
   const p = `${dir}/cp.json`;
   writeFileSync(p, 'not json', 'utf-8');
   if (loadCheckpoint(p) === null) pass('loadCheckpoint returns null on garbage JSON');

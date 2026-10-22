@@ -47,7 +47,7 @@ const standalone = appliesTo('Standalone modes with profile and custom context')
 const ownContext = appliesTo('Modes that load only their mode file');
 const delegated = skill.split('### Modes delegated to subagent')[1] ?? '';
 
-for (const mode of ['triage', 'calibrate', 'intake', 'ats']) {
+for (const mode of ['triage', 'calibrate', 'intake', 'ats', 'retro']) {
   const missing = [];
   if (!argumentHint.includes(mode)) missing.push('argument-hint');
   if (!skill.includes(`| \`${mode}\` | \`${mode}\` |`)) missing.push('routing table');

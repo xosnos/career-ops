@@ -303,3 +303,39 @@ func TestDashboardStatusRoutineAppliedSaveDoesNotRepair(t *testing.T) {
 		t.Fatalf("routine Applied save must not append a correction: %s", ledger)
 	}
 }
+
+// The dashboard kills set-status after 30s from inside Bubble Tea's Update, and
+// a move into Interview may start a JD archive that takes longer. The writer
+// must ask set-status not to wait for it.
+func TestDashboardStatusDetachesJDArchive(t *testing.T) {
+	root := t.TempDir()
+	argvFile := filepath.Join(root, "argv.json")
+	writeStatusTarget(t, filepath.Join(root, "path-resolver.mjs"), "")
+	writeStatusTarget(t, filepath.Join(root, "set-status.mjs"),
+		"import { writeFileSync } from 'node:fs';\n"+
+			"writeFileSync(process.env.ARGV_FILE, JSON.stringify(process.argv.slice(2)));\n"+
+			"console.log(JSON.stringify({changed:true,newStatus:'Interview'}))")
+	t.Setenv("ARGV_FILE", argvFile)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := UpdateApplicationStatus(root, model.CareerApplication{ReportNumber: "7"}, "Interview"); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(argv), `"--detach-jd-archive"`) {
+		t.Fatalf("status writer must pass --detach-jd-archive, got %s", argv)
+	}
+}

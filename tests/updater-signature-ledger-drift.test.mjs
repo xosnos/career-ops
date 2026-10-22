@@ -56,6 +56,7 @@ function makeOrigin() {
   g('config', 'user.name', 'Test');
   g('config', 'core.autocrlf', 'false');
   g('config', 'commit.gpgsign', 'false');
+  g('config', 'core.hooksPath', join(dir, 'no-such-hooks'));
   seed(dir, SIGNATURES, '# Signatures\n\n- @first\n');
   seed(dir, CONTROL, '# Manifesto\n\nv1\n');
   seed(dir, USER_PATH, '| base | Acme | Intern |\n');
@@ -72,6 +73,7 @@ function cloneInstall(originDir) {
   g('config', 'user.name', 'Test');
   g('config', 'core.autocrlf', 'false');
   g('config', 'commit.gpgsign', 'false');
+  g('config', 'core.hooksPath', join(dir, 'no-such-hooks'));
   return { dir, g };
 }
 

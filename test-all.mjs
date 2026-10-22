@@ -16,6 +16,14 @@
  *                                             # one process each. Default: every available
  *                                             # CPU, or CAREER_OPS_TEST_JOBS when set.
  *                                             # 1 imports them into this process in turn.
+ *                                             # With more than 1, the inline sections
+ *                                             # below run at the same time as the
+ *                                             # discovered suites, in one of the N slots.
+ *
+ *   `--inline-child <result.json>` is how a run with more than one job starts
+ *   those inline sections in a process of their own. It is not a way to run
+ *   part of the suite: it prints no summary and its exit code says nothing
+ *   about what failed.
  *
  *   LOUD WARNING: `--only` runs ONLY discovered tests/ files — every inline
  *   core section above (syntax, scripts, dashboard, data contract, personal
@@ -40,7 +48,7 @@
  */
 
 
-import { execSync, execFile, execFileSync, spawn, spawnSync } from 'child_process';
+import { execSync, execFileSync, spawn, spawnSync } from 'child_process';
 import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync as _rmSync, statSync, unlinkSync, realpathSync, symlinkSync, copyFileSync, openSync, closeSync } from 'fs';
 
 // Windows keeps a handle open on a just-exited child process's working files
@@ -58,16 +66,18 @@ import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, writeFil
 const rmSync = (target, opts = {}) => _rmSync(target, { maxRetries: 10, retryDelay: 100, ...opts });
 import { join, dirname, basename, relative, delimiter } from 'path';
 import { tmpdir, availableParallelism } from 'os';
-import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
-import { pass, fail, warn, run, runAcrossUtcDay, runAcrossLocalDay, lastRunFailure, formatRunFailure, fileExists, finish, results, absorbResults, importSuiteContained, linkNodeModules, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
+import { pass, fail, warn, run, runAcrossUtcDay, runAcrossLocalDay, lastRunFailure, formatRunFailure, fileExists, finish, results, absorbResults, importSuiteContained, linkNodeModules, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv, pinSandboxDataRoot, exitOnInterrupt, ownRootEnv } from './tests/helpers.mjs';
 import { flagValue, hasFlag } from './lib/cli-flags.mjs';
 import { collectMjsFiles } from './lib/mjs-files.mjs';
+import { checkSyntax, NODE_CHECK_TIMEOUT_MS } from './lib/syntax-check.mjs';
 import { walkTree, listTree } from './lib/walk-tree.mjs';
 import { FROZEN_EVALUATION_MODES, KNOWN_EVALUATION_MODES, discoverEvaluationModes, readModeText, structuralGaps } from './tests/evaluation-mode-parity-helpers.mjs';
 import { childFailureExcerpt } from './lib/failure-excerpt.mjs';
 import { SCRATCH_PREFIX, markScratchOwner, sweepScratchDirs } from './lib/scratch-dirs.mjs';
+import { MARKER_FILE } from './tests/data-root-guard.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
 /**
  * Read a repo-relative text file as UTF-8.
@@ -88,6 +98,11 @@ function readFile(path) {
     }
   }
   return content;
+}
+
+function readOfertaMode() {
+  return readFile('modes/oferta.md')
+    .replace(/^\*\*\d+\. .+?\*\*\. Read `(modes\/oferta-signals\/[^`]+)` when .*$/gm, (_, file) => readFile(file));
 }
 
 /**
@@ -112,6 +127,16 @@ const normalizeEol = (text) => text.replace(/\r\n/g, '\n');
  * @returns {string} File contents with LF-only line endings.
  */
 const readTextLF = (path) => normalizeEol(readFile(path));
+
+// An interrupted run still answers for the developer's data (#5113). A signal
+// handler only runs between two turns of the event loop, and most of this file
+// is synchronous: every discovered suite is awaited, so the loop turns there,
+// and the script smoke tests yield between scripts for the same reason.
+//
+// Not in the inline sections' child (`--inline-child`, #5146): the run that
+// started it answers for the data and stops the child on its way out, so a
+// handler there would only print the notice a second time.
+if (!hasFlag(process.argv, '--inline-child')) exitOnInterrupt();
 
 // ── Auto-discovered test files (issue #1440) ─────────────────────────────
 // Deterministic: recursive readdirSync with default lexicographic sort of
@@ -280,6 +305,11 @@ async function runDiscovered(filter = null) {
   }
   for (const f of files) {
     const rel = f.slice(ROOT.length + 1);
+    // In-process suites share this process's environment. One that moves the
+    // data root for its own fixture and leaves it there, or deletes the
+    // variable to "restore" it, would hand every suite after it a different
+    // root — the developer's own, in the second case (#5113).
+    pinSandboxDataRoot();
     const kind = discoveredSuiteKind(readFileSync(f, 'utf-8'));
     if (SUITE_REFUSALS[kind]) {
       fail(SUITE_REFUSALS[kind](rel));
@@ -426,20 +456,115 @@ async function runSuiteInChild(f, scratch, index) {
   };
 }
 
+// ── The inline sections, at the same time as the suites (#5146) ──────────
+//
+// Everything between the two INLINE SECTIONS markers further down predates
+// tests/: sections that run one after another in one process. They were a
+// little under 30% of a full run, and no discovered suite started until the
+// last of them had finished.
+//
+// With more than one job, this process starts a second copy of itself that
+// runs only those sections (`--inline-child`), and runs the discovered suites
+// in the pool meanwhile. The child takes one of the N slots while it runs.
+//
+// What stays the same as running them first:
+//   - the log. The child writes to this process's own stdout and stderr, so
+//     the sections stream as they always did. Every suite's output is held
+//     until the child has exited, which is the buffering the pool already does
+//     to keep discovery order;
+//   - the totals and the exit code. The child hands results() back through a
+//     file, the way a suite's child does;
+//   - `--jobs 1`, where everything still runs in this process, in order.
+//
+// What differs: the sections and the suites are in the working tree at the
+// same time. Neither may leave something in the repository where the other
+// can find it: see "Parallel runs" in tests/README.md.
+
+/**
+ * Start this file's inline sections in a process of their own.
+ *
+ * @param {string} resultFile - Where the child writes its counters.
+ * @returns {Promise<{status: number|null, signal: string|null, error: string|null, ms: number}>}
+ *   Resolves when the child has ended, however it ended.
+ */
+function startInlineSections(resultFile) {
+  const startedAt = Date.now();
+  // The command line this process was given, plus the one flag: the sections
+  // read --quick from it, and a flag added later reaches them without a list
+  // here to keep up to date. No `cwd`: the sections have always run wherever
+  // the runner was started from.
+  const child = spawn(NODE, [fileURLToPath(import.meta.url), ...process.argv.slice(2), '--inline-child', resultFile], {
+    env: process.env,
+    stdio: 'inherit',
+  });
+  let exited = false;
+  // Still running when this process exits only if the run was cut short, by
+  // an error thrown in the pool for one. Left alone the child would go on
+  // printing sections into a terminal whose run is over. A signal that kills
+  // this process outright does not come through here; Ctrl-C reaches the
+  // child by itself, as part of the same foreground process group.
+  process.on('exit', () => { if (!exited) child.kill('SIGKILL'); });
+  return new Promise((resolve) => {
+    // Once only, for the reason spawnSuite() gives: a child that fails to
+    // spawn emits 'error' and may emit 'close' after it.
+    const settle = (status, signal, error = null) => {
+      if (exited) return;
+      exited = true;
+      resolve({ status, signal, error, ms: Date.now() - startedAt });
+    };
+    child.on('error', (e) => settle(null, null, String(e?.message ?? e)));
+    child.on('close', (status, signal) => settle(status, signal));
+  });
+}
+
+/**
+ * Fold the inline sections' child into this run: its counters, and one failure
+ * if it stopped before the last section.
+ *
+ * @param {{status: number|null, signal: string|null, error: string|null}} r - How the child ended.
+ * @param {string} resultFile - Where it wrote its counters.
+ * @returns {void}
+ */
+function reportInlineSections(r, resultFile) {
+  let counts = null;
+  try { counts = JSON.parse(readFileSync(resultFile, 'utf-8')); } catch { /* reported below */ }
+  if (counts) absorbResults(counts);
+  if (counts?.completed) {
+    // finish() reads process.exitCode for a failure the counters never saw.
+    // In one process a section that set it reached finish() directly.
+    if (counts.runnerFailed) process.exitCode = 1;
+    return;
+  }
+  // An uncaught throw or an exit call in a section. In one process that ended
+  // the run on the spot, with no summary and nothing after it run. Here the
+  // suites have run regardless, so the run goes on to report them, and this is
+  // the line that says the sections above are not all of them.
+  const how = r.error ? `could not start: ${r.error}` : `exit ${r.status ?? '?'}${r.signal ? `, ${r.signal}` : ''}`;
+  fail(`the inline sections stopped before the last one (${how}) — every section after the output above did not run`
+    + (counts ? '' : ', and none of the assertions above are in the totals'));
+}
+
 /**
  * Run the discovered suites `jobs` at a time and report them in discovery order.
  *
  * @param {string[]} files - Suites, already in discovery order.
  * @param {number} jobs - How many children to keep running.
+ * @param {object} [options]
+ * @param {boolean} [options.withInlineSections] - Also run this file's inline
+ *   sections, in one of the `jobs` slots, and print them before any suite.
  * @returns {Promise<void>}
  */
-async function runDiscoveredParallel(files, jobs) {
+async function runDiscoveredParallel(files, jobs, { withInlineSections = false } = {}) {
   const scratch = mkdtempSync(join(tmpdir(), 'career-ops-test-jobs-'));
   const startedAt = Date.now();
   const finished = new Array(files.length).fill(null);
   let next = 0;
   let reported = 0;
+  // While the sections are still printing, nothing else may: a suite that has
+  // finished waits in `finished` exactly as one waiting for its turn does.
+  let held = withInlineSections;
   const flush = () => {
+    if (held) return;
     while (reported < files.length && finished[reported]) {
       finished[reported].report();
       reported++;
@@ -452,14 +577,33 @@ async function runDiscoveredParallel(files, jobs) {
       flush();
     }
   };
+  const pool = Math.min(jobs, files.length);
+  let inlineMs = 0;
   try {
-    await Promise.all(Array.from({ length: jobs }, worker));
+    if (withInlineSections) {
+      const resultFile = join(scratch, 'inline.json');
+      // One slot is the sections' until they finish; then the pool gets it.
+      const meanwhile = Math.min(jobs - 1, files.length);
+      const sections = startInlineSections(resultFile).then((r) => {
+        inlineMs = r.ms;
+        reportInlineSections(r, resultFile);
+        held = false;
+        flush();
+        return meanwhile < pool ? worker() : undefined;
+      });
+      await Promise.all([sections, ...Array.from({ length: meanwhile }, worker)]);
+    } else {
+      await Promise.all(Array.from({ length: pool }, worker));
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
   const wall = (Date.now() - startedAt) / 1000;
   const summed = finished.reduce((n, r) => n + (r?.ms ?? 0), 0) / 1000;
-  console.log(`\n  ⏱  ${files.length} discovered suites in ${wall.toFixed(0)}s, ${jobs} at a time (${summed.toFixed(0)}s of suite time; --jobs N or CAREER_OPS_TEST_JOBS to change, 1 runs them in-process)`);
+  console.log(`\n  ⏱  ${files.length} discovered suites in ${wall.toFixed(0)}s, ${pool} at a time (${summed.toFixed(0)}s of suite time; --jobs N or CAREER_OPS_TEST_JOBS to change, 1 runs them in-process)`);
+  if (withInlineSections) {
+    console.log(`  ⏱  the inline sections ran at the same time, for the first ${(inlineMs / 1000).toFixed(0)}s, in one of the ${jobs} slots`);
+  }
   const lingering = files.filter((_, i) => finished[i]?.lingered).map((f) => f.slice(ROOT.length + 1));
   if (lingering.length) {
     // Not a failure: the serial loop never notices these. Named because each
@@ -467,6 +611,14 @@ async function runDiscoveredParallel(files, jobs) {
     // open is usually a server or timer the suite meant to close.
     console.log(`  ⏱  ${lingering.length} suite(s) kept their process alive after finishing and were cut off: ${lingering.join(', ')}`);
   }
+}
+
+// Set in the process a run with more than one job starts for the inline
+// sections: the file its counters go to. See startInlineSections().
+const INLINE_CHILD = hasFlag(process.argv, '--inline-child') ? (flagValue(process.argv, '--inline-child') ?? '') : null;
+if (INLINE_CHILD === '' || INLINE_CHILD?.startsWith('--')) {
+  console.log('  ❌ --inline-child requires a result file; it is how test-all.mjs starts its own inline sections, not a flag to pass by hand');
+  process.exit(1);
 }
 
 // A scratch copy left by a killed run used to poison every walker that follows:
@@ -482,8 +634,11 @@ async function runDiscoveredParallel(files, jobs) {
 // Placed before the `--only` exit below: the 264-failure run is exactly the one
 // a developer then re-runs with `--only core-test-layout` to look closer, and a
 // sweep they skip past would leave that second run behaving differently again.
+//
+// Not in the inline sections' child: the run that started it has just swept,
+// and a directory it could not remove would be warned about, and counted, twice.
 {
-  const { removed, failed } = sweepScratchDirs(ROOT);
+  const { removed, failed } = INLINE_CHILD === null ? sweepScratchDirs(ROOT) : { removed: [], failed: [] };
   // Only speak when there was something to say. A sweep is silent on the
   // overwhelming majority of runs, and a line reporting that nothing happened
   // would be noise at the top of every one of them. `kept` is deliberately not
@@ -544,6 +699,38 @@ if (ONLY !== null) {
   finish();
 }
 
+// More than one job: the inline sections go to a child and the discovered
+// suites start now, not after them. One suite gains nothing from a process of
+// its own, as in runDiscovered(), and none at all is the hard failure
+// runDiscovered() reports once the sections have run.
+if (INLINE_CHILD === null && JOBS > 1) {
+  const files = discoverTests(TESTS_DIR);
+  if (files.length > 1) {
+    await runDiscoveredParallel(files, JOBS, { withInlineSections: true });
+    finish();
+  }
+}
+
+// What the inline sections' child reports back, written as the process ends
+// so that a section that threw or exited still hands over what it counted;
+// `completed` is how the parent tells that from a run that reached the end.
+let inlineSectionsCompleted = false;
+let inlineRunnerFailed = false;
+if (INLINE_CHILD !== null) {
+  process.on('exit', () => {
+    try {
+      writeFileSync(INLINE_CHILD, JSON.stringify({ ...results(), completed: inlineSectionsCompleted, runnerFailed: inlineRunnerFailed }));
+    } catch {
+      // Nothing to report to: the parent reads a missing file as sections that died.
+    }
+  });
+}
+
+// ── INLINE SECTIONS: BEGIN ──────────────────────────────────────
+// From here to the END marker is what `--inline-child` runs.
+// tests/test-all-inline-jobs.test.mjs replaces this stretch with fixture
+// sections, so both markers have to stay where the stretch starts and ends.
+
 console.log('\n🧪 career-ops test suite\n');
 
 // ── 1. SYNTAX CHECKS ────────────────────────────────────────────
@@ -566,25 +753,26 @@ const mjsFiles = collectMjsFiles(ROOT).map(f => f.slice(ROOT.length + 1).replace
 // diff two runs' pass labels.
 console.log(`  (${mjsFiles.length} .mjs files, recursive from the repository root)`);
 
-// `node --check` parses a file and exits; it runs no user code, touches no
-// shared state, and its result depends on nothing but that one file. Spawning
-// the files one at a time was pure process-startup latency, so they go through
-// a bounded pool instead (#2387) — which is also what keeps the recursive scope
-// above a wall-clock non-event. Results are collected by index and reported
-// afterwards in collector order, so the log stays byte-identical to the
-// sequential version regardless of completion order.
-const SYNTAX_POOL_SIZE = 8;
-const execFileAsync = promisify(execFile);
-const syntaxOk = new Array(mjsFiles.length);
-const syntaxDetail = new Array(mjsFiles.length);
-let nextSyntaxIdx = 0;
+// One process parses all of them, and `node --check` then runs only on a file
+// that pass did not vouch for, so a failure below carries the diagnostic it
+// always carried (lib/syntax-check.mjs, #5078). One `node --check` per file,
+// even eight at a time (#2387), was 22 s of starting node for 0.3 s of parsing.
+// Results come back by index and are reported in collector order, so the log
+// does not depend on what finished first.
+const { errors: syntaxErrors, fastPassUnavailable } = await checkSyntax(mjsFiles, { cwd: ROOT, node: NODE });
+if (fastPassUnavailable) {
+  // Not a failure and not a narrower check: every file went through
+  // `node --check` instead. Said out loud because it costs about 20 s a run,
+  // and nothing else here would show where they went.
+  console.log(`  (the single-process parse did not run: ${fastPassUnavailable}; each file was checked with node --check instead)`);
+}
 
 // A bare catch reports a child killed on timeout, or one that never spawned, as
 // "has syntax errors" — sending the reader hunting for a parse error that does
 // not exist. Keep enough of the child's own diagnosis to tell those apart.
 const describeCheckFailure = (err) => {
   if (err?.killed || err?.signal === 'SIGTERM' || err?.code === 'ETIMEDOUT') {
-    return `node --check timed out after 30000ms${err.signal ? ` (signal ${err.signal})` : ''}`;
+    return `node --check timed out after ${NODE_CHECK_TIMEOUT_MS}ms${err.signal ? ` (signal ${err.signal})` : ''}`;
   }
   const stderr = String(err?.stderr ?? '').trim();
   if (!stderr) return `no stderr (exit ${err?.code ?? 'unknown'})`;
@@ -594,25 +782,11 @@ const describeCheckFailure = (err) => {
   return clipped.replace(/\n/g, '\n    ');
 };
 
-const syntaxWorker = async () => {
-  for (let i = nextSyntaxIdx++; i < mjsFiles.length; i = nextSyntaxIdx++) {
-    try {
-      await execFileAsync(NODE, ['--check', mjsFiles[i]], { cwd: ROOT, timeout: 30000 });
-      syntaxOk[i] = true;
-    } catch (err) {
-      syntaxOk[i] = false;
-      syntaxDetail[i] = describeCheckFailure(err);
-    }
-  }
-};
-await Promise.all(
-  Array.from({ length: Math.min(SYNTAX_POOL_SIZE, mjsFiles.length) }, syntaxWorker)
-);
 mjsFiles.forEach((f, i) => {
-  if (syntaxOk[i]) {
+  if (!syntaxErrors[i]) {
     pass(`${f} syntax OK`);
   } else {
-    fail(`${f} has syntax errors\n    ${syntaxDetail[i] ?? 'no diagnostic captured'}`);
+    fail(`${f} has syntax errors\n    ${describeCheckFailure(syntaxErrors[i])}`);
   }
 });
 
@@ -755,7 +929,18 @@ try {
       // Directories are materialised even when empty, which the old recursion
       // did by mkdir-ing before it read.
       onDir: (abs) => mkdirSync(mirror(abs), { recursive: true }),
-      onFile: (abs) => copyFileSync(abs, mirror(abs)),
+      // A file that is gone by the time it is copied was never part of the
+      // tree under test: the discovered suites run during this copy (#5146),
+      // and some keep a lock, a probe or a fixture in the checkout for a
+      // moment. The walk already passes over a directory that vanishes under
+      // it; anything else that goes wrong with a copy still stops the run.
+      onFile: (abs) => {
+        try {
+          copyFileSync(abs, mirror(abs));
+        } catch (err) {
+          if (err?.code !== 'ENOENT' || existsSync(abs)) throw err;
+        }
+      },
     });
   };
 
@@ -772,6 +957,9 @@ try {
     'cdp-diff-focused.patch',
     'test_diff.patch',
     'test_diff_utf8.patch',
+    // A marker redirects the data root, and the copy would follow the
+    // developer's to their real data (#5113).
+    MARKER_FILE,
     basename(scriptTmp),
   ];
   copyDirSync(ROOT, scriptTmp, excludeDirs);
@@ -797,7 +985,19 @@ try {
     'utf-8'
   );
 
+  // The copy is its own data root: no override, and no marker copied in, so
+  // each script falls through to the directory it runs from. Passed
+  // explicitly because a child inherits the environment otherwise, and an
+  // inherited CAREER_OPS_ROOT outranks the script's own location — these
+  // smoke tests appended a fixture row to the developer's real
+  // data/assessments.tsv that way, on every run (#5113).
+  const scratchEnv = ownRootEnv();
+
   for (const script of scripts) {
+    // Let a pending SIGINT/SIGTERM land between scripts. This loop is otherwise
+    // one synchronous stretch, the longest in the file, and a signal handler
+    // cannot run inside one.
+    await new Promise((resolve) => setImmediate(resolve));
     const { name, allowFail, timeoutMs } = script;
     const parts = name.split(' ');
     const scriptFile = parts[0];
@@ -826,6 +1026,14 @@ try {
       fail(`${name} declares an unusable timeoutMs (${String(timeoutMs)}) — must be a positive integer number of milliseconds`);
       continue;
     }
+    // Same rule for the declared exit status. Every entry wrote `expectExit`
+    // and nothing read it: a pass meant exit 0 whatever the entry said, so
+    // cv-sync-check.mjs's `expectExit: 1` was a claim no check stood behind.
+    const expectExit = Object.hasOwn(script, 'expectExit') ? script.expectExit : 0;
+    if (!Number.isInteger(expectExit) || expectExit < 0) {
+      fail(`${name} declares an unusable expectExit (${String(expectExit)}) — must be a non-negative integer exit status`);
+      continue;
+    }
     const budgetMs = declared ? timeoutMs : DEFAULT_SCRIPT_TIMEOUT_MS;
     const startedAt = Date.now();
     // Spread rather than defaulted: `{ timeout: undefined }` reads to
@@ -833,6 +1041,7 @@ try {
     // a hung CI job. Absent means absent, so run()'s own default stands.
     const result = run(NODE, [join(scriptTmp, scriptFile), ...args], {
       cwd: scriptTmp,
+      env: scratchEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(declared ? { timeout: timeoutMs } : {}),
     });
@@ -852,11 +1061,17 @@ try {
       warn(`${name} used ${(elapsedMs / 1000).toFixed(1)}s of its ${(budgetMs / 1000).toFixed(0)}s budget `
         + `(${Math.round((elapsedMs / budgetMs) * 100)}%) — it is passing, but it is close to being killed for time`);
     }
-    if (result !== null) {
-      pass(`${name} runs OK`);
-    } else if (allowFail && !crashedBeforeRunning(lastRunFailure())) {
-      warn(`${name} exited with error (expected without user data)`);
-    } else if (allowFail) {
+    // A signal kill (a timeout) has no exit status, so it can never match.
+    const failure = result === null ? lastRunFailure() : null;
+    const status = result !== null ? 0 : (failure?.status ?? null);
+    const crashed = result === null && crashedBeforeRunning(failure);
+    if (status === expectExit && !crashed) {
+      pass(expectExit === 0 ? `${name} runs OK` : `${name} exits ${expectExit} as declared`);
+    } else if (allowFail && status !== null && !crashed) {
+      // Allowed, not confirmed: the exit depends on user data a developer's
+      // copy may carry, so say what happened rather than why it might have.
+      warn(`${name} exited ${status}, not the declared ${expectExit} (allowFail: its exit depends on user data)`);
+    } else if (allowFail && crashed) {
       // allowFail says "a non-zero exit is expected here", never "any outcome
       // is fine". A script that dies with an uncaught exception did not run at
       // all, and reporting that as the expected failure is how #3440 sat in
@@ -868,7 +1083,7 @@ try {
       // Include the child's exit status and streams. Without them a CI-only
       // failure arrives as a bare `<name> crashed`: no stack, no assertion
       // text, no exit code, and nothing a reader can act on.
-      fail(`${name} crashed${formatRunFailure()}`);
+      fail(`${name} ${crashed || status === null ? 'crashed' : `exited ${status}, not the declared ${expectExit}`}${formatRunFailure()}`);
     }
   }
 
@@ -878,6 +1093,7 @@ try {
   {
     const assessmentCli = (...argv) => spawnSync(NODE, [join(scriptTmp, 'assessment-log.mjs'), ...argv], {
       cwd: scriptTmp,
+      env: scratchEnv,
       encoding: 'utf-8',
       timeout: 30000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -932,6 +1148,7 @@ try {
   {
     const replyWatchCli = (...argv) => spawnSync(NODE, [join(scriptTmp, 'reply-watch.mjs'), ...argv], {
       cwd: scriptTmp,
+      env: scratchEnv,
       encoding: 'utf-8',
       timeout: 30000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -2159,9 +2376,11 @@ for (const f of skillEntrypoints) {
 // This asserts the opposite behaviour directly: invoked where git sees nothing,
 // the guard must exit non-zero.
 {
-  const probeDir = join(ROOT, '.tmp-coverage-guard-probe');
+  // Inside the repository, because the point is a directory git knows nothing
+  // about; under the scratch prefix, so that no walker reads the two scripts
+  // copied into it as part of the tree (#5146).
+  const probeDir = mkdtempSync(join(ROOT, `${SCRATCH_PREFIX}coverage-guard-probe-`));
   try {
-    mkdirSync(probeDir, { recursive: true });
     copyFileSync(join(ROOT, 'validate-system-paths-coverage.mjs'), join(probeDir, 'validate-system-paths-coverage.mjs'));
     copyFileSync(join(ROOT, 'update-system.mjs'), join(probeDir, 'update-system.mjs'));
     const probe = spawnSync(process.execPath, [join(probeDir, 'validate-system-paths-coverage.mjs')], {
@@ -2384,6 +2603,8 @@ const allowedFiles = [
 // the ones this PR actually intends to allow, so they get the tighter
 // check instead of loosening the shared one.
 const exactAllowedFiles = new Set([
+  // Exempt only the root Indonesian README, not similarly named files.
+  'README.id.md',
   // GitHub Sponsors funding target + Codex plugin manifest (#4131) — same
   // maintainer-credit shape as the .claude-plugin/.github/plugin ones above.
   'funding.json', '.codex-plugin/plugin.json',
@@ -2463,18 +2684,26 @@ console.log('\n7. Absolute path check');
 
 // Same git grep approach: only scans tracked files. Untracked AI tool
 // outputs, local debate artifacts, etc. can't false-positive here.
+// stderr is piped (captured, not printed) so a failure below can report it.
 const absPathRaw = run(
   'git',
   ['grep', '-n', '/Users/', '--', '*.mjs', '*.sh', '*.md', '*.go', '*.yml'],
-  { stdio: ['pipe', 'pipe', 'ignore'] }
+  { stdio: ['pipe', 'pipe', 'pipe'] }
 );
+// run() returns null for every failure, but only exit 1 means "no matches".
+// Any other failure (git missing, not a repository, the timeout) means the
+// scan never ran, and reading that null as "no absolute paths" would pass
+// this check without checking anything.
+const absPathScanFailed = absPathRaw === null && lastRunFailure()?.status !== 1;
 // The old shell pipeline's `grep -v` exclusions, now as a JS filter.
 const ABS_PATH_EXCLUDE = ['README.md', 'LICENSE', 'CLAUDE.md', 'test-all.mjs'];
 const absPathLines = (absPathRaw || '')
   .split('\n')
   .filter(Boolean)
   .filter(line => !ABS_PATH_EXCLUDE.some(x => line.includes(x)));
-if (absPathLines.length === 0) {
+if (absPathScanFailed) {
+  fail(`Absolute path check could not run: git grep failed${formatRunFailure()}`);
+} else if (absPathLines.length === 0) {
   pass('No absolute paths in code files');
 } else {
   for (const line of absPathLines) {
@@ -2601,10 +2830,14 @@ try {
 }
 try {
   const { repoRelativeManifestPath, injectPrintPageCss } = await import(pathToFileURL(join(ROOT, 'generate-pdf.mjs')).href);
-  const insideHtmlPath = join(ROOT, 'templates', 'cv-template.html');
-  const outsideHtmlPath = join(dirname(ROOT), 'outside-cv-template.html');
+  // Relative to the workspace, which is the data root: the checkout only when
+  // nothing points the root elsewhere, and the suite does (#5113). A path under
+  // output/, which is where a tailored CV's source HTML lives.
+  const manifestRoot = getCareerOpsRoot();
+  const insideHtmlPath = join(manifestRoot, 'output', 'cv-template.html');
+  const outsideHtmlPath = join(dirname(manifestRoot), 'outside-cv-template.html');
 
-  if (repoRelativeManifestPath(insideHtmlPath) === 'templates/cv-template.html') {
+  if (repoRelativeManifestPath(insideHtmlPath) === 'output/cv-template.html') {
     pass('PDF manifest records repo-local source HTML paths');
   } else {
     fail('PDF manifest does not normalize repo-local source HTML paths');
@@ -2654,7 +2887,7 @@ try {
   if (
     generatePdfScript.includes('preferCSSPageSize: true') &&
     generatePdfScript.includes("right: '0'") &&
-    generatePdfScript.includes('injectPrintPageCss(html, format)') &&
+    generatePdfScript.includes('injectPrintPageCss(html, format, opts.country)') &&
     !/page\.pdf\(\{\s*format:/s.test(generatePdfScript)
   ) {
     pass('PDF renderer uses CSS @page margins instead of Playwright margins');
@@ -2730,14 +2963,15 @@ console.log('\n7c. Updater dashboard rebuild');
 const updateSystemScript = readFile('update-system.mjs');
 if (
   /git\('diff',\s*'--name-only',\s*'HEAD',\s*'--',\s*'dashboard'\)/.test(updateSystemScript) &&
-  /path\.startsWith\(['"]dashboard\/['"]\)\s*&&\s*path\.endsWith\(['"]\.go['"]\)/.test(updateSystemScript) &&
-  /go build -o career-dashboard \./.test(updateSystemScript) &&
+  /return dashboardBuildInputsChanged\(changed\.split\('\\n'\)\)/.test(updateSystemScript) &&
+  /execFileSync\('go',\s*\['build',\s*'-o',\s*binary,\s*'\.'\]/.test(updateSystemScript) &&
+  /const binary = dashboardBinaryName\(\);/.test(updateSystemScript) &&
   /cwd:\s*join\(ROOT,\s*['"]dashboard['"]\)/.test(updateSystemScript) &&
   /dashboard binary rebuild skipped/.test(updateSystemScript)
 ) {
-  pass('update-system rebuilds dashboard binary when dashboard Go sources change');
+  pass('update-system rebuilds dashboard binary when dashboard Go sources or go.mod/go.sum change');
 } else {
-  fail('update-system does not rebuild dashboard binary after dashboard Go source updates');
+  fail('update-system does not rebuild dashboard binary after dashboard Go source or dependency updates');
 }
 
 if (updateSystemScript.includes("'CODEX.md'")) {
@@ -2810,9 +3044,11 @@ if (/language:\s*\n(?:\s*#.*\n)*\s*output:\s*["']?en["']?/.test(profileExample))
 // (Windows core.autocrlf=true). Exercises the real read path: a CRLF fixture
 // is written to disk and read back through readTextLF, so stripping the
 // normalization out of readTextLF fails this check on every platform. The
-// fixture lives under ROOT because readFile resolves ROOT-relative paths.
+// fixture lives under ROOT because readFile resolves ROOT-relative paths, and
+// under the scratch prefix so that nothing walking the tree meanwhile reads it
+// (#5146).
 try {
-  const crlfGuardTmp = mkdtempSync(join(ROOT, 'crlf-guard-'));
+  const crlfGuardTmp = mkdtempSync(join(ROOT, `${SCRATCH_PREFIX}crlf-guard-`));
   try {
     writeFileSync(
       join(crlfGuardTmp, 'crlf-fixture.md'),
@@ -3581,7 +3817,7 @@ if (
   fail('application-answers CLI accepted a missing option value');
 }
 
-const ofertaMode = readFile('modes/oferta.md');
+const ofertaMode = readOfertaMode();
 const autoPipelineMode = readFile('modes/auto-pipeline.md');
 if (
   ofertaMode.includes('## Liveness gate (URL inputs)') &&
@@ -5025,7 +5261,7 @@ try {
 } catch (err) {
   fail(`scan.mjs fresh-install pipeline test crashed: ${err.message}`);
 } finally {
-  delete process.env.CAREER_OPS_ROOT;
+  pinSandboxDataRoot();
   if (priorPipelineEnv === undefined) delete process.env.CAREER_OPS_PIPELINE;
   else process.env.CAREER_OPS_PIPELINE = priorPipelineEnv;
   if (fixtureRoot) {
@@ -5781,7 +6017,6 @@ try {
   const nodeTrackerWriters = [
     ['dedup-tracker.mjs', 1],
     ['normalize-statuses.mjs', 1],
-    ['reply-watch.mjs', 1],
     ['tracker.mjs', 2],
   ];
   const unsafeWriters = nodeTrackerWriters.filter(([name, minTransactions]) => {
@@ -7531,7 +7766,10 @@ if (!hasBrowser) {
   if (!liveJobUrl) {
     warn('archive render skipped — Greenhouse API unreachable');
   } else {
-    const JDS_DIR = join(ROOT, 'jds');
+    // jds/ under the data root, where archive-posting.mjs writes: the
+    // suite's scratch root, so the capture this makes and removes never sits
+    // among the developer's own (#5113).
+    const JDS_DIR = join(getCareerOpsRoot(), 'jds');
     const startedAt = Date.now();
     const archiveOut = run('node', ['archive-posting.mjs', liveJobUrl], { timeout: 60000 });
 
@@ -9546,6 +9784,10 @@ try {
       // via lib/local-today.mjs (#3070), so the fixture carries that too.
       mkdirSync(join(e2eTmp, 'lib'), { recursive: true });
       copyFileSync(join(ROOT, 'lib', 'local-today.mjs'), join(e2eTmp, 'lib', 'local-today.mjs'));
+      // ...and pipeline-lock.mjs runs the shared lock protocol from
+      // lib/dir-lock.mjs (#5358), so the fixture carries that too.
+      copyFileSync(join(ROOT, 'lib', 'dir-lock.mjs'), join(e2eTmp, 'lib', 'dir-lock.mjs'));
+      copyFileSync(join(ROOT, 'lib', 'yaml-document.mjs'), join(e2eTmp, 'lib', 'yaml-document.mjs'));
       // ...and followup-cadence now delegates flag validation to the shared
       // lib/cli-flags.mjs helper, so the fixture carries that too.
       copyFileSync(join(ROOT, 'lib', 'cli-flags.mjs'), join(e2eTmp, 'lib', 'cli-flags.mjs'));
@@ -9553,6 +9795,11 @@ try {
       // which is what lets the copy answer "am I main?" correctly from a
       // symlinked tmpdir in the first place.
       copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(e2eTmp, 'lib', 'is-main-module.mjs'));
+      // ...and it reads the apply date from status-log.tsv with funnel-velocity.mjs's
+      // ledger parser, so the fixture carries that module and its imports too.
+      for (const rel of ['funnel-velocity.mjs', 'stats.mjs', 'funnel-stages.mjs', 'lib/scan-history-columns.mjs', 'lib/tsv-formula-escape.mjs']) {
+        copyFileSync(join(ROOT, rel), join(e2eTmp, rel));
+      }
       mkdirSync(join(e2eTmp, 'templates'), { recursive: true });
       copyFileSync(join(ROOT, 'templates', 'states.yml'), join(e2eTmp, 'templates', 'states.yml'));
       // The sandbox resolves js-yaml (and the rest of followup-cadence's
@@ -9587,7 +9834,7 @@ try {
         cwd: e2eTmp,
         encoding: 'utf-8',
         timeout: 30000,
-        env: { ...process.env, CAREER_OPS_PROFILE: '' },
+        env: ownRootEnv({ CAREER_OPS_PROFILE: '' }),
       });
       const e2e = JSON.parse(e2eOut.trim());
       const byNum = new Map((e2e.entries || []).map(entry => [entry.num, entry]));
@@ -14214,8 +14461,8 @@ try {
   const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`, BATCH_ARG_FILE: argFile };
   const out = run(getBash(), [toBashPath(join(batchDir, 'batch-runner.sh')), '--parallel', '1'], { cwd: tmp, env, stdio: ['pipe', 'pipe', 'pipe'] }) || '';
   const argv = existsSync(argFile) ? readFileSync(argFile, 'utf-8') : '';
-  if (argv.includes('--model') && argv.includes('claude-haiku-4-5') && out.includes('spend_tier=economy')) {
-    pass('economy spend_tier resolves to claude-haiku-4-5');
+  if (argv.includes('--model') && argv.includes('claude-haiku-5-5') && out.includes('spend_tier=economy')) {
+    pass('economy spend_tier resolves to claude-haiku-5-5');
   } else {
     fail(`economy spend_tier did not route to haiku: argv=${JSON.stringify(argv)}, out=${JSON.stringify(out.slice(-240))}`);
   }
@@ -14492,7 +14739,10 @@ try {
 
   // Chromium blocks file:// subresources from setContent() pages (the page
   // stays at about:blank), so ./fonts refs must become data: URLs (#951).
-  const fontFile = readdirSync(join(ROOT, 'fonts')).find(f => f.endsWith('.woff2'));
+  // Not a `__…` name: tests/generate-pdf-font-cache.test.mjs keeps probe
+  // files called that in fonts/ while it runs, which can be during this
+  // section (#5146), and one of those is gone again a moment later.
+  const fontFile = readdirSync(join(ROOT, 'fonts')).find(f => f.endsWith('.woff2') && !f.startsWith('__'));
   const inlined = await inlineLocalFonts(
     `<style>@font-face { src: url('./fonts/${fontFile}') format('woff2'); }</style>`
   );
@@ -16654,7 +16904,7 @@ try {
     { file: 'web/src/lib/format.ts', re: /CANONICAL_STATES\s*=\s*\[([\s\S]*?)\]/, upper: false, exclude: [] },
     { file: 'web/src/app/actions/registry.ts', re: /CANON_STATUS\s*=\s*\[([\s\S]*?)\]/, upper: false, exclude: [] },
     { file: 'web/src/app/actions/registry.ts', re: /TAB_VALUES\s*=\s*\[([\s\S]*?)\]/, upper: true, exclude: [] },
-    { file: 'web/src/components/pipeline-view.tsx', re: /TABS\s*=\s*\[([\s\S]*?)\]/, upper: true, exclude: [] },
+    { file: 'web/src/lib/pipeline-navigation.mjs', re: /PIPELINE_TABS\s*=[^[]*\[([\s\S]*?)\]/, upper: true, exclude: [] },
     // Analytics now derives its funnel from canonStatus in analytics-metrics;
     // it no longer owns a hardcoded status-list copy to keep in sync.
     // The states ACL used to be checked here too. It moved to its own block
@@ -16722,7 +16972,7 @@ try {
     // The assistant preamble also enumerates the states in PROSE (the setStatus
     // list + the filterPipeline tab enum). Those drift the same way — the AI
     // couldn't offer to set/filter by Hired — so check them too (#2249).
-    const assistantPath = join(ROOT, 'web', 'src', 'app', 'api', 'assistant', 'route.ts');
+    const assistantPath = join(ROOT, 'web', 'src', 'lib', 'assistant-preamble.mjs');
     if (existsSync(assistantPath)) {
       const src = readFileSync(assistantPath, 'utf-8');
       const proseChecks = [
@@ -17010,6 +17260,8 @@ try {
       'claude-invocation.mjs': join(webLib, 'claude-invocation.mjs'),
       'worker-capabilities.mjs': join(webLib, 'worker-capabilities.mjs'),
       'cv-envelope.mjs': join(webLib, 'cv-envelope.mjs'),
+      'report-envelope.mjs': join(webLib, 'report-envelope.mjs'),
+      'report-persist.mjs': join(webLib, 'report-persist.mjs'),
       'run-prompts.mjs': join(webLib, 'run-prompts.mjs'),
       'api/run/route.ts': runRoutePath,
     };
@@ -17027,10 +17279,12 @@ try {
         // about Claude (#2507).
         capabilities = await import(pathToFileURL(required['worker-capabilities.mjs']).href);
         prompts = await import(pathToFileURL(required['run-prompts.mjs']).href);
-        // Imported for its side effect of resolving: run-prompts pulls cv-envelope
-        // for CV_ENVELOPE_INSTRUCTION, so a break there would surface here anyway,
-        // but naming it keeps the failure message specific.
+        // Imported for their side effect of resolving: run-prompts pulls
+        // cv-envelope and report-envelope; report-persist is the evaluate
+        // backend writer. Naming them keeps the failure message specific.
         await import(pathToFileURL(required['cv-envelope.mjs']).href);
+        await import(pathToFileURL(required['report-envelope.mjs']).href);
+        await import(pathToFileURL(required['report-persist.mjs']).href);
       } catch (err) {
         fail(`web pdf write-scope modules could not be imported (${err.message}) — the #2185 freeze cannot verify`);
       }
@@ -17123,6 +17377,28 @@ try {
         } else {
           const granted = WRITE_CAPABLE_TOOLS.filter((t) => toolNames(allowed).includes(t));
           fail(`web pdf command line grants write access via ${granted.join(', ')} — an unscoped write grant is the #2185 hole`);
+        }
+
+        // evaluate (and CLI mode names oferta / auto-pipeline) ingest a posting.
+        // Job postings are data, never instructions — Write/Bash on that kind is
+        // the same unscoped grant #2185 closed for pdf.
+        const jdKinds = invocation.UNTRUSTED_JD_KINDS ?? ['evaluate', 'oferta', 'auto-pipeline'];
+        const jdWrite = [];
+        for (const kind of jdKinds) {
+          const jdArgs = claudeCliArgs({ kind, prompt: 'freeze-probe' });
+          const jdAllowed = argValue(jdArgs, '--allowedTools');
+          const jdDenied = argValue(jdArgs, '--disallowedTools');
+          if (grantsWriteCapability({ allowed: jdAllowed, disallowed: jdDenied })) {
+            const granted = WRITE_CAPABLE_TOOLS.filter((t) => toolNames(jdAllowed).includes(t));
+            jdWrite.push(`${kind}:${granted.join(',')}`);
+          }
+          const undeniedJd = WRITE_CAPABLE_TOOLS.filter((t) => !toolNames(jdDenied).includes(t));
+          if (undeniedJd.length) jdWrite.push(`${kind}:undenied:${undeniedJd.join(',')}`);
+        }
+        if (jdWrite.length === 0) {
+          pass('web evaluate/oferta/auto-pipeline command lines grant no write-capable tool');
+        } else {
+          fail(`web untrusted-JD kinds still grant write access (${jdWrite.join('; ')}) — a posting can aim Write/Bash`);
         }
 
         // Denied by name, not merely omitted: --permission-mode acceptEdits exists
@@ -17467,20 +17743,10 @@ console.log('\n20. Path resolution layer and overrides');
 try {
   const { getCareerOpsRoot } = await import(pathToFileURL(join(ROOT, 'path-resolver.mjs')).href);
 
-  // 1. Unset env vars should resolve to codebase root (ROOT)
-  const originalRoot = process.env.CAREER_OPS_ROOT;
-  const originalDataDir = process.env.CAREER_OPS_DATA_DIR;
-  delete process.env.CAREER_OPS_ROOT;
-  delete process.env.CAREER_OPS_DATA_DIR;
-
+  // 1. The default, with nothing set, is checked in step 6 below, against a
+  //    copy of the resolver: asked of this checkout it is the marker's target
+  //    for anyone who has a .career-ops-data file, and failed for them.
   try {
-    const defaultRoot = getCareerOpsRoot();
-    if (defaultRoot === ROOT) {
-      pass('getCareerOpsRoot() defaults to codebase root when environment variables are unset');
-    } else {
-      fail(`getCareerOpsRoot() returned ${defaultRoot}, expected ${ROOT}`);
-    }
-
     // 2. CAREER_OPS_ROOT should override the resolved path
     const testOverridePath = join(ROOT, 'test-override-path');
     process.env.CAREER_OPS_ROOT = testOverridePath;
@@ -17490,7 +17756,7 @@ try {
     } else {
       fail(`getCareerOpsRoot() returned ${overriddenRoot}, expected ${testOverridePath}`);
     }
-    delete process.env.CAREER_OPS_ROOT;
+    process.env.CAREER_OPS_ROOT = '';
 
     // 3. CAREER_OPS_DATA_DIR should override the resolved path
     process.env.CAREER_OPS_DATA_DIR = testOverridePath;
@@ -17501,44 +17767,40 @@ try {
       fail(`getCareerOpsRoot() returned ${overriddenDataDirRoot}, expected ${testOverridePath}`);
     }
   } finally {
-    // Restore original env vars
-    if (originalRoot) process.env.CAREER_OPS_ROOT = originalRoot;
-    else delete process.env.CAREER_OPS_ROOT;
-
-    if (originalDataDir) process.env.CAREER_OPS_DATA_DIR = originalDataDir;
-    else delete process.env.CAREER_OPS_DATA_DIR;
+    // Back to the suite's own data root. Restoring by deleting, as the steps
+    // below used to, left every later section resolving to the developer's.
+    pinSandboxDataRoot();
   }
 
   // 4. Test doctor.mjs respects target directory or target override when CAREER_OPS_ROOT is set
-  const tempTarget = mkdtempSync(join(ROOT, 'co-temp-target-'));
+  const tempTarget = mkdtempSync(join(ROOT, `${SCRATCH_PREFIX}co-temp-target-`));
+  // The override goes in the child's env, here and below, not in this
+  // process's: nothing then has to be put back.
   try {
-    process.env.CAREER_OPS_ROOT = tempTarget;
-    const r = JSON.parse(run(NODE, ['doctor.mjs', '--json']) || '{}');
+    const r = JSON.parse(run(NODE, ['doctor.mjs', '--json'], {
+      env: { ...process.env, CAREER_OPS_ROOT: tempTarget, CAREER_OPS_DATA_DIR: '' },
+    }) || '{}');
     if (r.onboardingNeeded === true && r.missing.includes('cv.md')) {
       pass('doctor.mjs respects CAREER_OPS_ROOT default root check');
     } else {
       fail(`doctor.mjs with CAREER_OPS_ROOT override failed: ${JSON.stringify(r)}`);
     }
-  } finally {
-    delete process.env.CAREER_OPS_ROOT;
-  }
 
-  // 4b. Test doctor.mjs respects CAREER_OPS_DATA_DIR override
-  try {
-    process.env.CAREER_OPS_DATA_DIR = tempTarget;
-    const r = JSON.parse(run(NODE, ['doctor.mjs', '--json']) || '{}');
-    if (r.onboardingNeeded === true && r.missing.includes('cv.md')) {
+    // 4b. Test doctor.mjs respects CAREER_OPS_DATA_DIR override
+    const rDataDir = JSON.parse(run(NODE, ['doctor.mjs', '--json'], {
+      env: { ...process.env, CAREER_OPS_ROOT: '', CAREER_OPS_DATA_DIR: tempTarget },
+    }) || '{}');
+    if (rDataDir.onboardingNeeded === true && rDataDir.missing.includes('cv.md')) {
       pass('doctor.mjs respects CAREER_OPS_DATA_DIR override check');
     } else {
-      fail(`doctor.mjs with CAREER_OPS_DATA_DIR override failed: ${JSON.stringify(r)}`);
+      fail(`doctor.mjs with CAREER_OPS_DATA_DIR override failed: ${JSON.stringify(rDataDir)}`);
     }
   } finally {
-    delete process.env.CAREER_OPS_DATA_DIR;
     rmSync(tempTarget, { recursive: true, force: true });
   }
 
   // 5. Test normalize-statuses respects CAREER_OPS_ROOT and does not touch main repo tracker
-  const tempRoot = mkdtempSync(join(ROOT, 'co-temp-root-'));
+  const tempRoot = mkdtempSync(join(ROOT, `${SCRATCH_PREFIX}co-temp-root-`));
   const tempTrackerDir = join(tempRoot, 'data');
   mkdirSync(tempTrackerDir, { recursive: true });
   const tempTracker = join(tempTrackerDir, 'applications.md');
@@ -17553,8 +17815,9 @@ try {
 
 
   try {
-    process.env.CAREER_OPS_ROOT = tempRoot;
-    run(NODE, ['normalize-statuses.mjs']);
+    run(NODE, ['normalize-statuses.mjs'], {
+      env: { ...process.env, CAREER_OPS_ROOT: tempRoot, CAREER_OPS_DATA_DIR: '' },
+    });
     const updated = readFileSync(tempTracker, 'utf-8');
     if (updated.includes('| Applied |') && !updated.includes('**Applied**')) {
       pass('normalize-statuses.mjs respects CAREER_OPS_ROOT and modifies the correct tracker file');
@@ -17563,27 +17826,36 @@ try {
     }
 
   } finally {
-    delete process.env.CAREER_OPS_ROOT;
     rmSync(tempRoot, { recursive: true, force: true });
   }
 
   // 6. Test .career-ops-data marker file resolution
-  const tempMarkerRoot = mkdtempSync(join(ROOT, 'co-temp-marker-'));
-  const markerFile = join(ROOT, '.career-ops-data');
-  const originalRootEnv = process.env.CAREER_OPS_ROOT;
-  const originalDataDirEnv = process.env.CAREER_OPS_DATA_DIR;
-  delete process.env.CAREER_OPS_ROOT;
-  delete process.env.CAREER_OPS_DATA_DIR;
-
-  const originalMarkerExists = existsSync(markerFile);
-  let originalMarkerContent = '';
-  if (originalMarkerExists) {
-    try { originalMarkerContent = readFileSync(markerFile, 'utf-8'); } catch {}
-  }
-
+  //
+  // Against a copy of path-resolver.mjs, never the checkout's own marker. The
+  // resolver looks for the marker beside itself, so a copy in a scratch
+  // directory reads a scratch marker. This used to write the repo-root marker
+  // and put the developer's back afterwards, inside a `catch {}`: an
+  // interrupted or failed restore left every script resolving to a temp
+  // directory that no longer existed, and said nothing (#5113).
+  // realpathSync: the copy locates itself through import.meta.url, which Node
+  // gives as a real path, and macOS's temp directory is a symlink.
+  const tempMarkerCode = realpathSync(mkdtempSync(join(tmpdir(), 'co-temp-marker-code-')));
+  const tempMarkerRoot = mkdtempSync(join(tmpdir(), 'co-temp-marker-data-'));
   try {
-    writeFileSync(markerFile, tempMarkerRoot, 'utf-8');
-    const { getCareerOpsRoot: getRootWithMarker } = await import(pathToFileURL(join(ROOT, 'path-resolver.mjs')).href + '?cachebust=' + Date.now());
+    copyFileSync(join(ROOT, 'path-resolver.mjs'), join(tempMarkerCode, 'path-resolver.mjs'));
+    const { getCareerOpsRoot: getRootWithMarker } = await import(pathToFileURL(join(tempMarkerCode, 'path-resolver.mjs')).href);
+    // The marker, and the default behind it, only apply when neither variable
+    // is set.
+    delete process.env.CAREER_OPS_ROOT;
+    delete process.env.CAREER_OPS_DATA_DIR;
+    const defaultRoot = getRootWithMarker();
+    if (defaultRoot === tempMarkerCode) {
+      pass('getCareerOpsRoot() defaults to codebase root when environment variables are unset');
+    } else {
+      fail(`getCareerOpsRoot() returned ${defaultRoot}, expected ${tempMarkerCode}`);
+    }
+
+    writeFileSync(join(tempMarkerCode, MARKER_FILE), tempMarkerRoot, 'utf-8');
     const resolved = getRootWithMarker();
     if (resolved === tempMarkerRoot) {
       pass('getCareerOpsRoot() respects .career-ops-data marker file');
@@ -17591,15 +17863,8 @@ try {
       fail(`getCareerOpsRoot() with marker returned ${resolved}, expected ${tempMarkerRoot}`);
     }
   } finally {
-    try {
-      if (originalMarkerExists) {
-        writeFileSync(markerFile, originalMarkerContent, 'utf-8');
-      } else {
-        unlinkSync(markerFile);
-      }
-    } catch {}
-    if (originalRootEnv) process.env.CAREER_OPS_ROOT = originalRootEnv;
-    if (originalDataDirEnv) process.env.CAREER_OPS_DATA_DIR = originalDataDirEnv;
+    pinSandboxDataRoot();
+    rmSync(tempMarkerCode, { recursive: true, force: true });
     rmSync(tempMarkerRoot, { recursive: true, force: true });
   }
 
@@ -18856,7 +19121,7 @@ console.log('\n68. Immigration-status requirement overreach (#2033)');
   // 2. Mode section structure: oferta signal (jurisdiction derivation,
   //    exceptions honesty, ITAR note) + apply step (status-vs-authorization
   //    rule, never-auto-answer guarantees).
-  const ofertaNow = readFile('modes/oferta.md');
+  const ofertaNow = readOfertaMode();
   const applyNow = readFile('modes/apply.md');
   const sigStart = ofertaNow.indexOf('**11. Immigration-Status Requirement Overreach**');
   const sigEnd = ofertaNow.indexOf('### Output format:', Math.max(sigStart, 0));
@@ -19392,7 +19657,7 @@ console.log('\n73. Gemini evaluator and encoding');
 
 let geminiTmp = null;
 try {
-  geminiTmp = mkdtempSync(join(ROOT, 'co-gemini-'));
+  geminiTmp = mkdtempSync(join(ROOT, `${SCRATCH_PREFIX}co-gemini-`));
   const configDir = join(geminiTmp, 'config');
   const modesDir = join(geminiTmp, 'modes', 'tr');
   mkdirSync(configDir, { recursive: true });
@@ -19529,6 +19794,19 @@ try {
   }
 } catch (e) {
   fail(`sponsors check: ${e.message}`);
+}
+
+// ── INLINE SECTIONS: END ────────────────────────────────────────
+
+if (INLINE_CHILD !== null) {
+  inlineSectionsCompleted = true;
+  inlineRunnerFailed = Boolean(process.exitCode);
+  // Whatever is still queued for a pipe is lost to an exit; the parent prints
+  // the suites straight after, so a cut here would be a hole in mid-log.
+  await new Promise((resolve) => process.stdout.write('', resolve));
+  await new Promise((resolve) => process.stderr.write('', resolve));
+  // exit(), as finish() does: a section may have left a handle open.
+  process.exit(0);
 }
 
 await runDiscovered();

@@ -102,6 +102,10 @@ If yes:
 8. Show final status:
    > "✅ Updated to v{version}. Run `node doctor.mjs` anytime to verify setup, or `node verify-pipeline.mjs` to check your data."
 
+   If the updater printed `Update applied but NOT committed`, relay that complete block instead
+   of the plain success line: include the staged state, all three recovery options and their exact
+   commands, and the `--commit-on-branch` opt-in (#3846).
+
    If the updater's output ended with its note about the CareerOps Manifesto, relay it once (do not drop it when summarizing):
    > "One more thing: this project ships with the CareerOps Manifesto — a new way of job searching is taking shape, and you are already practicing it. Run `npm run manifesto` to read it and sign it if you want to help. No action needed."
 
@@ -123,5 +127,6 @@ If the user says "rollback" or runs `/career-ops update rollback`:
 - User-specific customizations (archetypes, scoring weights, narrative) belong in `modes/_profile.md` or `config/profile.yml`, never in `modes/_shared.md`
 - CLAUDE.md's local additions (everything after the two-line `@AGENTS.md` header) MUST be saved before apply and restored immediately after — on both the success AND failure path (Step 4.2, Step 4.4). `update-system.mjs apply` resets CLAUDE.md before it can fail partway through, so a failed apply still needs the restore. `apply` has no awareness of this content and will silently discard it otherwise.
 - After a successful apply, `node hired-share.mjs --status` may report a hire that was never asked about, or one marked "later" more than 30 days ago. That earns **at most ONE** gentle mention of the Hired Wall, then the answer is respected — never a scheduled reminder. Cadence and wording: `AGENTS.md` → "Celebrating a hire (the Hired Wall)".
+- Never trim the staged-but-uncommitted notice or its recovery commands (Step 4.8).
 - If anything goes wrong, tell the user to run `node update-system.mjs rollback`
 - Keep the output concise — users don't want walls of text during an update

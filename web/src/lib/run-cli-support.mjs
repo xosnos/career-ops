@@ -430,14 +430,18 @@ export function newCompletedReportNum(beforeEntries, afterEntries) {
 }
 
 // Graceful-SIGTERM budget (ms) for a run, kept safely under the route's 800s
-// maxDuration. pdf reserves headroom for its post-agent render+mark phase; a
-// plain evaluate has no such phase, so it gets nearly the whole budget. The old
+// maxDuration. pdf reserves headroom for its post-agent Chromium render.
+// evaluate reserves 60s for report-persist (write the report, merge the
+// tracker, release the sentinel), which runs after the agent. Other kinds
+// have no post-agent phase, so they keep nearly the whole budget. The old
 // 285s evaluate floor killed real evaluations mid-run — ~25 Bash calls plus web
 // searches routinely run longer — and the kill then misreported as "didn't save
 // a report" (#3124).
 export const RUN_MAX_DURATION_S = 800;
 export function killMsForKind(kind) {
-  return kind === "pdf" ? 600_000 : 780_000;
+  if (kind === "pdf") return 600_000;
+  if (kind === "evaluate") return 740_000;
+  return 780_000;
 }
 
 // Message for a run the route stopped at its own time limit. It names the limit,
@@ -446,4 +450,24 @@ export function killMsForKind(kind) {
 // blaming the CLI sends the user to re-check the wrong thing (#3124).
 export function timeoutMessage(killMs, kind) {
   return `This run passed the ${Math.round(killMs / 1000)}s time limit and was stopped before it could finish — re-run it, or run a very long ${kind} on Claude Code directly. The CLI was working; we cut it off, so it isn't recorded as a result.`;
+}
+
+/**
+ * Structured CLIs stream each assistant message as text deltas with nothing
+ * between messages. A tool call ends a message, so the next text starts on a new
+ * line. Without the break, a <<cv-html>> opener that starts a new message lands
+ * mid-line after the previous message's prose, and parseCvEnvelope, which needs
+ * the opener on its own line, reports no envelope.
+ *
+ * @returns {(ev: ParsedEvent | null | undefined) => string} the text to append
+ */
+export function createAgentTextJoiner() {
+  let newMessage = false;
+  return (ev) => {
+    if (ev?.tool) newMessage = true;
+    if (!ev?.text) return "";
+    const text = newMessage ? `\n${ev.text}` : ev.text;
+    newMessage = false;
+    return text;
+  };
 }

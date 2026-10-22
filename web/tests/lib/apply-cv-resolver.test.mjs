@@ -143,6 +143,7 @@ test('generated CV uses the linked report identity when its application number d
     ].join('\n'));
     assert.equal(await resolveTailoredCv(undefined, '309'), first.paths.finalPdf);
     assert.equal(await resolveTailoredCv(undefined, '310'), second.paths.finalPdf);
+    assert.equal(await resolveTailoredCv(undefined, '0309'), first.paths.finalPdf);
   });
 });
 

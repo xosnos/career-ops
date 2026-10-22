@@ -268,6 +268,24 @@ try {
     }
   }
 
+  {
+    // An empty value in equals form is a missing operand (#5127).
+    const opts = { valueFlags: ['--since'], requireOperand: true };
+    const rEmpty = runValidate(['--since='], ['--since', '--help', '-h'], 'USAGE-TEXT', opts);
+    if (rEmpty.status === 1 && /--since requires a value/.test(rEmpty.stderr || '')) {
+      pass('requireOperand: --since= (empty value) is rejected as a missing operand (#5127)');
+    } else {
+      fail(`requireOperand empty equals case => status=${rEmpty.status} stdout=${rEmpty.stdout} stderr=${rEmpty.stderr}`);
+    }
+
+    const rValid = runValidate(['--since=2026-01-01'], ['--since', '--help', '-h'], 'USAGE-TEXT', opts);
+    if (rValid.status === 0 && /REACHED-END/.test(rValid.stdout || '')) {
+      pass('requireOperand: --since=2026-01-01 passes with non-empty operand (#5127)');
+    } else {
+      fail(`requireOperand valid equals case => status=${rValid.status} stdout=${rValid.stdout} stderr=${rValid.stderr}`);
+    }
+  }
+
 } catch (e) {
   fail(`cli-flags tests crashed: ${e.message}`);
 }

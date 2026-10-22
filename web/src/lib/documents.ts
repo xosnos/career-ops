@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parsePdfManifestRows } from "./apply/cv-selection.mjs";
+import { inlineDisposition } from "./content-disposition.mjs";
 
 export type DocumentKind = "cv" | "cover" | "unknown";
 
@@ -215,18 +216,11 @@ export async function handleDocumentsRequest(
       }
 
       const buf = fs.readFileSync(fd);
-      const asciiFilename = doc.filename
-        .replace(/[^\x20-\x7E]/g, "?")
-        .replace(/(["\\])/g, "\\$1");
-      const encodedFilename = encodeURIComponent(doc.filename).replace(
-        /[()*]/g,
-        (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-      );
       return new Response(new Uint8Array(buf), {
         status: 200,
         headers: {
           "Content-Type": "application/pdf",
-          "Content-Disposition": `inline; filename="${asciiFilename}"; filename*=UTF-8''${encodedFilename}`,
+          "Content-Disposition": inlineDisposition(doc.filename),
           "Cache-Control": "no-store",
         },
       });

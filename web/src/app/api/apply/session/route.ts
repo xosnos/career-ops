@@ -1,6 +1,7 @@
 import { openSession } from "@/lib/apply/session";
 import { cliSubstitutionNotice, resolveCliOrFallback } from "@/lib/clis";
 import { blockedApplyUrlResponse, isUnsafeApplyUrlError, APPLY_URL_BLOCKED_MESSAGE } from "@/lib/apply/url-guard.mjs";
+import { readJsonObject } from "@/lib/json-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,12 +12,8 @@ export const maxDuration = 300; // the agentic drive + interpretation fallbacks 
 // cliId enables the agentic fallback (the AI interprets the live form) when
 // deterministic extraction is low-confidence.
 export async function POST(req: Request) {
-  let body: { url?: string; cliId?: string; agent?: boolean; _noApplyBtn?: boolean };
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json({ error: "bad json" }, { status: 400 });
-  }
+  const body = await readJsonObject<{ url?: string; cliId?: string; agent?: boolean; _noApplyBtn?: boolean }>(req);
+  if (!body) return Response.json({ error: "bad json" }, { status: 400 });
   const url = (body.url ?? "").trim();
   const blocked = await blockedApplyUrlResponse(url);
   if (blocked) return Response.json({ error: blocked.error }, { status: blocked.status });

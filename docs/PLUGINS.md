@@ -54,7 +54,13 @@ A plugin is a directory with a `manifest.json` (validated before any code is
 imported), an `index.mjs` (default-exports your hooks), and optionally a
 `skill.md` + `_helpers`. Hooks: **provider / ingest / search / notify / export**
 — there is no auto-submit hook. Producers **return** `Job[]`; the engine writes
-them. Reach the network **only** through `ctx.fetch` (your manifest
+them. Before it does, an `ingest` or `search` result already in the tracker,
+the pipeline or `data/scan-history.tsv` (compared by normalized URL) is dropped.
+A plugin whose manifest sets `"jobPostings": true` also gets the scanner's
+discovery filters: `data/blacklist.md` and `portals.yml`'s `title_filter` /
+`location_filter`, and what it admits is recorded in `data/scan-history.tsv`.
+Leave the flag out when your results are not job postings (interview events, for
+example). Reach the network **only** through `ctx.fetch` (your manifest
 `allowedHosts` is enforced, with SSRF protection). Keys arrive via `ctx.env`,
 non-secret settings via `ctx.settings`. To deduplicate the postings you return —
 or to compare a posting against one you have already seen — use
@@ -64,7 +70,10 @@ never match one `''` against another. For a posting on a multi-employer
 aggregator (LinkedIn, Indeed), `ctx.aggregatorPostingId(url)` returns
 `{ domain, id }` — the requisition id that a tracking link and the canonical view
 share — or `null` when it does not know. Compare two ids only when their
-`domain` matches, and never read `null` as a match.
+`domain` matches, and never read `null` as a match. If your plugin keeps a file
+of its own (a cursor, a saved posting), build its path from `ctx.dataRoot`, the
+absolute path of the user's data root; a bare relative path lands in whichever
+directory the command was run from.
 
 See `plugins/README.md` for the full contract + the honest trust model (plain
 ESM has no hard sandbox — bundled plugins are code-reviewed; your own are your

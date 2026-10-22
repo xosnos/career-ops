@@ -14,7 +14,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { join, dirname, resolve } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { barePrefixDomainKeywords } from './title-keywords.mjs';
@@ -95,6 +95,20 @@ function validateUrl(value, path, errors) {
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     add(errors, path, `unsupported URL protocol: ${parsed.protocol}`);
+  }
+}
+
+// buildTitleFilter reads only an array as a keyword list and drops anything else,
+// so a bare string leaves the filter matching every title. validateKeywordList
+// accepts one (location_filter and content_filter do wrap it), so the title
+// filter's own lists are checked here. A warning, not an error: title_filter has
+// always been lenient about this and a hard failure would break configs that
+// currently load.
+function warnBareStringKeywords(block, path, warnings) {
+  for (const key of ['positive', 'negative']) {
+    if (typeof block[key] === 'string') {
+      add(warnings, `${path}.${key}`, `a bare string is ignored by the title filter, so this list does nothing; write it as a list: [${JSON.stringify(block[key])}]`);
+    }
   }
 }
 
@@ -186,6 +200,7 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     if (!isObject(config.title_filter)) {
       add(errors, 'title_filter', 'title_filter must be an object');
     } else {
+      warnBareStringKeywords(config.title_filter, 'title_filter', warnings);
       validateKeywordList(config.title_filter.positive, 'title_filter.positive', errors);
       validateKeywordList(config.title_filter.negative, 'title_filter.negative', errors);
       validateKeywordList(config.title_filter.seniority_boost, 'title_filter.seniority_boost', errors);
@@ -211,6 +226,7 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
           add(errors, `title_filter_full.${key}`, `unknown title_filter_full field - expected one of ${TITLE_FILTER_FIELDS.join(', ')}`);
         }
       }
+      warnBareStringKeywords(config.title_filter_full, 'title_filter_full', warnings);
       validateKeywordList(config.title_filter_full.positive, 'title_filter_full.positive', errors);
       validateKeywordList(config.title_filter_full.negative, 'title_filter_full.negative', errors);
       validateKeywordList(config.title_filter_full.seniority_boost, 'title_filter_full.seniority_boost', errors);
@@ -241,6 +257,22 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       for (const idx of barePrefixDomainKeywords(config.domain_filter)) {
         add(errors, `domain_filter[${idx}]`, 'a word:/stem: prefix needs a term after it');
       }
+    }
+  }
+
+  // The languages a posting is wanted in, best first. scan.mjs skips an entry
+  // it cannot read, so a malformed list would quietly fall back to the default
+  // version — the typo can only surface here.
+  if (config.preferred_languages !== undefined) {
+    const list = config.preferred_languages;
+    if (!Array.isArray(list) && typeof list !== 'string') {
+      add(errors, 'preferred_languages', 'preferred_languages must be a list of language codes (e.g. [en])');
+    } else {
+      (Array.isArray(list) ? list : [list]).forEach((entry, idx) => {
+        if (typeof entry !== 'string' || !entry.trim()) {
+          add(errors, `preferred_languages[${idx}]`, 'each preferred language must be a non-empty language code');
+        }
+      });
     }
   }
 
@@ -305,6 +337,9 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       validateKeywordList(config.location_filter.block_hard, 'location_filter.block_hard', errors);
       if (config.location_filter.strict !== undefined && typeof config.location_filter.strict !== 'boolean') {
         add(errors, 'location_filter.strict', 'must be a boolean when set');
+      }
+      if (config.location_filter.remote_title_fallback !== undefined && typeof config.location_filter.remote_title_fallback !== 'boolean') {
+        add(errors, 'location_filter.remote_title_fallback', 'must be a boolean when set');
       }
     }
   }
@@ -380,6 +415,13 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       if (!isObject(entry)) {
         add(errors, base, `${noun} entry must be an object`);
         continue;
+      }
+      // Every consumer reads only a boolean `false` as "off". js-yaml follows
+      // YAML 1.2, where `no`, `off` and a quoted "false" are strings, so such an
+      // entry is scanned while looking disabled. Flagged here, because the
+      // scanners cannot tell a typo from a deliberate non-boolean.
+      if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean') {
+        add(errors, `${base}.enabled`, `enabled must be true or false, got ${JSON.stringify(entry.enabled)} - only a boolean false turns this ${noun} off, so it is still scanned`);
       }
       if (entry.enabled === false) continue;
 
@@ -463,7 +505,7 @@ async function validateFile(filePath) {
     throw new Error(`file not found: ${filePath}`);
   }
   const providerIds = await loadProviderIds();
-  const parsed = yaml.load(readFileSync(filePath, 'utf-8'));
+  const parsed = loadYaml(readFileSync(filePath, 'utf-8'));
   return validatePortalsConfig(parsed, { providerIds });
 }
 

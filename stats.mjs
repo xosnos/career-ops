@@ -22,7 +22,7 @@ import { validateFlags } from './lib/cli-flags.mjs';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { normalizeStatus, analyzeFromContent } from './followup-cadence.mjs';
@@ -38,15 +38,14 @@ const APPS_FILE = resolveTrackerPath(DATA_ROOT);
 const SCAN_HISTORY_FILE = join(DATA_ROOT, 'data', 'scan-history.tsv');
 const FOLLOWUPS_FILE = join(DATA_ROOT, 'data', 'follow-ups.md');
 const SCAN_RUNS_FILE = join(DATA_ROOT, 'data', 'scan-runs.tsv');
-const STATUS_LOG_FILE = join(DATA_ROOT, 'data', 'status-log.tsv');
 const PORTALS_FILE = join(DATA_ROOT, 'portals.yml');
 const PORTAL_HEALTH_FILE = join(DATA_ROOT, 'data', 'portal-health.tsv');
 
 const CANONICAL_STATUSES = ['Evaluated', 'Applied', 'Responded', 'Assessment', 'Interview', 'Offer', 'Hired', 'Rejected', 'Discarded', 'SKIP'];
 
-// In-flight applications. Deliberately NARROWER than the dashboard's
-// ActiveApps (which also counts Evaluated): an evaluated-but-never-sent row is
-// a candidate, not an application in flight. Hired is a terminal success, not
+// In-flight applications, shared with the web Analytics and Go dashboard
+// ActiveApps: an evaluated-but-never-sent row is a candidate, not an
+// application in flight. Hired is a terminal success, not
 // in flight, so it is intentionally excluded here (but see PURSUED/funnel).
 const ACTIVE_STATUSES = new Set(['Applied', 'Responded', 'Assessment', 'Interview', 'Offer']);
 
@@ -307,7 +306,7 @@ export function scanCompanyNames(content) {
 export function computePortalStats(portalsYmlContent, scanStats, producingCompanyNames = [], portalHealthContent = null) {
   let cfg;
   try {
-    cfg = yaml.load(String(portalsYmlContent ?? '')) || {};
+    cfg = loadYaml(String(portalsYmlContent ?? '')) || {};
   } catch {
     return null; // malformed YAML → no portal section rather than a crash
   }
@@ -389,7 +388,7 @@ export function computePortalStats(portalsYmlContent, scanStats, producingCompan
  */
 export function computePortalRecommendations(portalsContent, scanContent, healthContent, now = Date.now()) {
   let cfg;
-  try { cfg = yaml.load(String(portalsContent ?? '')) || {}; } catch { return null; }
+  try { cfg = loadYaml(String(portalsContent ?? '')) || {}; } catch { return null; }
   const positive = (n, fallback) => Number.isInteger(n) && n > 0 ? n : fallback;
   const days = positive(cfg.portal_prune_quiet_days, 30);
   const threshold = positive(cfg.portal_health_threshold, 3);
@@ -619,7 +618,7 @@ export function computeAllStats({
   scanRunsFile = SCAN_RUNS_FILE,
   portalsFile = PORTALS_FILE,
   portalHealthFile = PORTAL_HEALTH_FILE,
-  statusLogFile = STATUS_LOG_FILE,
+  statusLogFile = join(dirname(appsFile), 'status-log.tsv'),
   prune = false,
 } = {}) {
   const read = (f) => (existsSync(f) ? readFileSync(f, 'utf-8') : null);

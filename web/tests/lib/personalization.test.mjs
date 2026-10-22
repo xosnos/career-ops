@@ -10,12 +10,18 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atomicWriteWithBackup } from "../../src/lib/core/safe-write.ts";
-import { coercePersonalization, renderSection, sectionState, SECTIONS } from "../../src/lib/personalization.mjs";
+import { coercePersonalization, renderSection, SECTIONS } from "../../src/lib/personalization.mjs";
+import * as core from "../../../lib/personalization.mjs";
+const { scanHeadings, sectionState } = core;
 import { mergeSections, readPersonalizationState, savePersonalization, templatePath, UnsureProfileParseError } from "../../src/lib/personalization-file.mjs";
 
 // The REAL shipped template, not a synthetic one: if its headings change, this
 // fails here rather than silently leaving a section unaddressable.
 const TEMPLATE = readFileSync(new URL("../../../modes/_profile.template.md", import.meta.url), "utf8");
+
+test("web SECTIONS deep-equals core SECTIONS", () => {
+  assert.deepEqual(SECTIONS, core.SECTIONS);
+});
 
 test("every SECTIONS heading exists in the shipped template, in order", () => {
   let last = -1;
@@ -36,9 +42,16 @@ test("an empty/missing file reports every section as 'missing'", () => {
   for (const s of sectionState("", TEMPLATE)) assert.equal(s.state, "missing");
 });
 
+test("a heading with an empty body is reported as 'missing'", () => {
+  const user = `## Your Exit Narrative\n\n## Your Target Roles\n\nSome custom roles\n`;
+  const st = sectionState(user, TEMPLATE);
+  assert.equal(st.find((s) => s.id === "exitNarrative")?.state, "missing");
+  assert.equal(st.find((s) => s.id === "targetRoles")?.state, "filled");
+});
+
 test("merge replaces ONLY the given section bodies and keeps every other byte", () => {
   const rendered = { exitNarrative: "I am moving from consulting to product because I want to own outcomes." };
-  const merged = mergeSections(TEMPLATE, rendered);
+  const merged = mergeSections(TEMPLATE, rendered, core);
 
   // The replaced section carries the new body…
   assert.ok(merged.includes("## Your Exit Narrative\n\nI am moving from consulting to product"));
@@ -57,7 +70,7 @@ test("merge preserves the assistant's co-web-notes block and hand-written sectio
   const custom = TEMPLATE
     + "\n## My own section\n\nHand-written, must survive.\n"
     + "\n## Notes from the web assistant\n<!-- co-web-notes:start -->\n- prefers remote\n<!-- co-web-notes:end -->\n";
-  const merged = mergeSections(custom, { crossCuttingAdvantage: "Builder with real-world proof." });
+  const merged = mergeSections(custom, { crossCuttingAdvantage: "Builder with real-world proof." }, core);
   assert.ok(merged.includes("## My own section\n\nHand-written, must survive."));
   assert.ok(merged.includes("<!-- co-web-notes:start -->\n- prefers remote\n<!-- co-web-notes:end -->"));
   assert.ok(merged.includes("## Your Cross-cutting Advantage\n\nBuilder with real-world proof."));
@@ -66,7 +79,7 @@ test("merge preserves the assistant's co-web-notes block and hand-written sectio
 test("a section whose heading is absent is appended — before the notes block", () => {
   const partial = "# Profile customization\n\n## Notes from the web assistant\n<!-- co-web-notes:start -->\n- x\n<!-- co-web-notes:end -->\n";
   // Mirror the route: render first, then merge — mergeSections takes rendered bodies.
-  const merged = mergeSections(partial, { locationPolicy: renderSection("locationPolicy", ["Remote-first, EU timezones", "Hybrid only within NL"]) });
+  const merged = mergeSections(partial, { locationPolicy: renderSection("locationPolicy", ["Remote-first, EU timezones", "Hybrid only within NL"]) }, core);
   const iSec = merged.indexOf("## Your Location Policy");
   const iNotes = merged.indexOf("## Notes from the web assistant");
   assert.ok(iSec !== -1 && iNotes !== -1 && iSec < iNotes, "new section must sit before the notes block");
@@ -75,8 +88,8 @@ test("a section whose heading is absent is appended — before the notes block",
 
 test("merging is idempotent: the same patch twice yields the same file", () => {
   const p = { compTargets: "Targeting 85–100k EUR base for senior IC roles in NL." };
-  const once = mergeSections(TEMPLATE, p);
-  const twice = mergeSections(once, p);
+  const once = mergeSections(TEMPLATE, p, core);
+  const twice = mergeSections(once, p, core);
   assert.equal(once, twice);
 });
 
@@ -141,7 +154,7 @@ test("merge keeps CRLF line endings, odd spacing and trailing whitespace byte-fo
     "## My own section", "- a", "", "", "- b\t", "",
     "## Your Comp Targets", "old comp", "",
   ].join("\r\n") + "\r\n\r\n\r\n";
-  const merged = mergeSections(before, { exitNarrative: "new story" });
+  const merged = mergeSections(before, { exitNarrative: "new story" }, core);
   assertOnlyBodySwapped(before, merged, "new story");
   assert.equal(merged, before.replace("old story\r\nsecond line", "new story"));
   assert.ok(!/[^\r]\n/.test(merged), "no bare LF was introduced into a CRLF file");
@@ -149,7 +162,7 @@ test("merge keeps CRLF line endings, odd spacing and trailing whitespace byte-fo
 
 test("merge on the real template changes nothing but the one body", () => {
   const body = "I am moving from consulting to product.";
-  const merged = mergeSections(TEMPLATE, { exitNarrative: body });
+  const merged = mergeSections(TEMPLATE, { exitNarrative: body }, core);
   assertOnlyBodySwapped(TEMPLATE, merged, body);
   // The neighbours, guidance comments included, are the template's own bytes.
   const from = TEMPLATE.indexOf("## Your Cross-cutting Advantage");
@@ -158,19 +171,19 @@ test("merge on the real template changes nothing but the one body", () => {
 
 test("a file with no final newline keeps having none", () => {
   const before = "## Your Location Policy\n\n- old";
-  assert.equal(mergeSections(before, { locationPolicy: "- Remote" }), "## Your Location Policy\n\n- Remote");
+  assert.equal(mergeSections(before, { locationPolicy: "- Remote" }, core), "## Your Location Policy\n\n- Remote");
 });
 
 test("appending a missing section leaves every existing byte in place", () => {
   const before = "# Profile\r\n\r\nhand-written   \r\n";
-  const merged = mergeSections(before, { compTargets: "100k" });
+  const merged = mergeSections(before, { compTargets: "100k" }, core);
   assert.ok(merged.startsWith(before));
   assert.equal(merged.slice(before.length), "\r\n## Your Comp Targets\r\n\r\n100k\r\n");
 });
 
 test("a `## ` line inside a code fence is not a section boundary", () => {
   const before = "## Your Exit Narrative\n\nold\n\n## Mine\n\n```md\n## Your Comp Targets\n```\n\nafter the fence\n";
-  const merged = mergeSections(before, { exitNarrative: "new" });
+  const merged = mergeSections(before, { exitNarrative: "new" }, core);
   assert.equal(merged, before.replace("old", "new"));
 });
 
@@ -179,28 +192,28 @@ test("a `## ` line inside a code fence is not a section boundary", () => {
 
 test("merge refuses when a target heading appears twice", () => {
   const twice = "## Your Comp Targets\n\na\n\n## Your Comp Targets\n\nb\n";
-  assert.throws(() => mergeSections(twice, { compTargets: "c" }), UnsureProfileParseError);
+  assert.throws(() => mergeSections(twice, { compTargets: "c" }, core), UnsureProfileParseError);
 });
 
 test("merge refuses when a heading sits inside an HTML comment", () => {
   const commented = "## Your Exit Narrative\n\nstory\n\n<!--\n## Your Comp Targets\n\nparked\n-->\n";
-  assert.throws(() => mergeSections(commented, { exitNarrative: "x" }), UnsureProfileParseError);
+  assert.throws(() => mergeSections(commented, { exitNarrative: "x" }, core), UnsureProfileParseError);
 });
 
 test("merge refuses on a comment or a code fence that never closes", () => {
-  assert.throws(() => mergeSections("## Your Exit Narrative\n\nstory <!-- todo\n", { exitNarrative: "x" }), UnsureProfileParseError);
-  assert.throws(() => mergeSections("## Your Exit Narrative\n\n```\ncode\n", { exitNarrative: "x" }), UnsureProfileParseError);
+  assert.throws(() => mergeSections("## Your Exit Narrative\n\nstory <!-- todo\n", { exitNarrative: "x" }, core), UnsureProfileParseError);
+  assert.throws(() => mergeSections("## Your Exit Narrative\n\n```\ncode\n", { exitNarrative: "x" }, core), UnsureProfileParseError);
 });
 
 test("merge refuses to replace a section that holds the assistant's notes block", () => {
   const inside = "## Your Location Policy\n\n- NL\n<!-- co-web-notes:start -->\n- prefers remote\n<!-- co-web-notes:end -->\n";
-  assert.throws(() => mergeSections(inside, { locationPolicy: "- EU" }), UnsureProfileParseError);
+  assert.throws(() => mergeSections(inside, { locationPolicy: "- EU" }, core), UnsureProfileParseError);
 });
 
 test("merge refuses a body that would swallow the sections after it", () => {
   const before = "## Your Exit Narrative\n\nold\n\n## Your Comp Targets\n\n100k\n";
-  assert.throws(() => mergeSections(before, { exitNarrative: "see <!-- my notes" }), UnsureProfileParseError);
-  assert.throws(() => mergeSections(before, { exitNarrative: "```" }), UnsureProfileParseError);
+  assert.throws(() => mergeSections(before, { exitNarrative: "see <!-- my notes" }, core), UnsureProfileParseError);
+  assert.throws(() => mergeSections(before, { exitNarrative: "```" }, core), UnsureProfileParseError);
 });
 
 // ── the file: template lookup, atomic write ─────────────────────────────
@@ -223,7 +236,7 @@ test("the template is read from the checkout, not from the data root", (t) => {
   assert.equal(templatePath(codeRoot), join(codeRoot, "modes", "_profile.template.md"));
   // The data root has no template. Read from there, every section would
   // compare against "" and report "filled" on an untouched copy.
-  const { exists, sections } = readPersonalizationState(dataRoot, codeRoot);
+  const { exists, sections } = readPersonalizationState(dataRoot, codeRoot, core);
   assert.equal(exists, true);
   for (const s of sections) assert.equal(s.state, "template", s.heading);
 });
@@ -231,27 +244,27 @@ test("the template is read from the checkout, not from the data root", (t) => {
 test("a template sitting in the data root is ignored", (t) => {
   const { codeRoot, dataRoot } = splitInstall(t, { profile: TEMPLATE });
   writeFileSync(join(dataRoot, "modes", "_profile.template.md"), "## Your Exit Narrative\n\nstale copy\n");
-  for (const s of readPersonalizationState(dataRoot, codeRoot).sections) assert.equal(s.state, "template", s.heading);
+  for (const s of readPersonalizationState(dataRoot, codeRoot, core).sections) assert.equal(s.state, "template", s.heading);
 });
 
 test("a first save seeds the user's file from the checkout's template", (t) => {
   const { codeRoot, dataRoot, file } = splitInstall(t);
-  savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "100k base" }, write: atomicWriteWithBackup });
+  savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "100k base" }, write: atomicWriteWithBackup, core });
   const written = readFileSync(file, "utf8");
   assertOnlyBodySwapped(TEMPLATE, written, "100k base");
 });
 
 test("a missing template is an error: no state is reported and no sparse file is created", (t) => {
   const { codeRoot, dataRoot, file } = splitInstall(t, { template: null });
-  assert.throws(() => readPersonalizationState(dataRoot, codeRoot), /template/);
-  assert.throws(() => savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "100k" }, write: atomicWriteWithBackup }), /template/);
+  assert.throws(() => readPersonalizationState(dataRoot, codeRoot, core), /template/);
+  assert.throws(() => savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "100k" }, write: atomicWriteWithBackup, core }), /template/);
   assert.throws(() => readFileSync(file), { code: "ENOENT" });
 });
 
 test("a save goes through a temp file + rename, backs up the old bytes and leaves no temp behind", (t) => {
   const before = "# Mine\r\n\r\n## Your Comp Targets\r\n\r\nold\r\n\r\n## Keep\r\n\r\n- me\r\n";
   const { codeRoot, dataRoot, file } = splitInstall(t, { profile: before });
-  savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "new" }, write: atomicWriteWithBackup });
+  savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "new" }, write: atomicWriteWithBackup, core });
   assert.equal(readFileSync(file, "utf8"), before.replace("old", "new"));
   const left = readdirSync(join(dataRoot, "modes")).filter((f) => f !== "_profile.md");
   assert.equal(left.length, 1, `only the backup remains next to the file: ${left}`);
@@ -263,8 +276,8 @@ test("a refused save and a dry run never call the writer; the file keeps its byt
   const before = "## Your Comp Targets\n\na\n\n## Your Comp Targets\n\nb\n";
   const { codeRoot, dataRoot, file } = splitInstall(t, { profile: before });
   const write = () => assert.fail("the writer must not be reached");
-  assert.throws(() => savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "c" }, write }), UnsureProfileParseError);
-  savePersonalization({ dataRoot, codeRoot, patch: { exitNarrative: "x" }, dryRun: true, write });
+  assert.throws(() => savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "c" }, write, core }), UnsureProfileParseError);
+  savePersonalization({ dataRoot, codeRoot, patch: { exitNarrative: "x" }, dryRun: true, write, core });
   assert.equal(readFileSync(file, "utf8"), before);
   assert.deepEqual(readdirSync(join(dataRoot, "modes")), ["_profile.md"]);
 });
@@ -273,7 +286,7 @@ test("a file that is not valid UTF-8 is refused, not re-encoded", (t) => {
   const { codeRoot, dataRoot, file } = splitInstall(t);
   const bytes = Buffer.concat([Buffer.from("## Your Comp Targets\n\ncaf"), Buffer.from([0xe9]), Buffer.from("\n")]);
   writeFileSync(file, bytes);
-  assert.throws(() => savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "c" }, write: atomicWriteWithBackup }), UnsureProfileParseError);
+  assert.throws(() => savePersonalization({ dataRoot, codeRoot, patch: { compTargets: "c" }, write: atomicWriteWithBackup, core }), UnsureProfileParseError);
   assert.ok(readFileSync(file).equals(bytes));
 });
 

@@ -35,6 +35,7 @@ export function PipelineTableRowsSkeleton({ rows = 8, trackerColumn = false }: {
     <>
       {Array.from({ length: rows }).map((_, i) => (
         <tr key={i}>
+          {trackerColumn && <td className="w-8 px-3 py-3"><Skeleton className="size-4" /></td>}
           {trackerColumn && <td className="px-4 py-3"><Skeleton className="h-4 w-8" /></td>}
           <td className="px-4 py-3">
             <div className="flex items-center gap-2.5">

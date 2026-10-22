@@ -191,9 +191,10 @@ node test-all.mjs --quick --jobs 4           # Run at most 4 test files at a tim
 ```
 
 **The test files under `tests/` run in parallel**, one process each, as many at
-a time as the machine has CPUs. `--jobs N` changes that for one run and
-`CAREER_OPS_TEST_JOBS=N` for a machine; `1` runs them one after another in a
-single process. The log comes out in the same order either way. If a test
+a time as the machine has CPUs, and the inline sections of `test-all.mjs` run
+alongside them in one of those slots. `--jobs N` changes that for one run and
+`CAREER_OPS_TEST_JOBS=N` for a machine; `1` runs everything one after another
+in a single process. The log comes out in the same order either way. If a test
 passes alone and fails in a full run (or the reverse), rerun with `--jobs 1`
 and see "Parallel runs" in [`tests/README.md`](tests/README.md) for what a
 suite may not rely on.

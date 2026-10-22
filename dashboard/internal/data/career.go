@@ -3,6 +3,7 @@ package data
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,7 +18,6 @@ import (
 )
 
 var (
-	reReportLink     = regexp.MustCompile(`\[(\d+)\]\(([^)]+)\)`)
 	reScoreValue     = regexp.MustCompile(`(\d+\.?\d*)/5`)
 	reSeparatorRow   = regexp.MustCompile(`^\|\s*:?-+:?(?:\s*\|\s*:?-+:?)*\s*\|?\s*$`)
 	reArchetype      = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype)(?:\s+(?:detectado|detected))?\*\*\s*\|\s*(.+)`)
@@ -28,6 +28,7 @@ var (
 	reArchetypeColon = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype):\*\*\s*(.+)`)
 	reArchetypeYAML  = regexp.MustCompile(`(?m)^archetype:\s*"?([^"\n]+)"?\s*$`)
 	reReportURL      = regexp.MustCompile(`(?m)^\*\*URL:\*\*\s*(https?://\S+)`)
+	reReportLabel    = regexp.MustCompile(`^\d+$`)
 	// Backslash escapes a markdown link destination may carry; mirrors the
 	// unescape in tracker-parse.mjs markdownLinkDestination().
 	reMarkdownDestEscape = regexp.MustCompile(`\\([\\()<> ])`)
@@ -164,6 +165,25 @@ func resolveTrackerPath(careerOpsPath string) string {
 	return filepath.Clean(filepath.Join(careerOpsPath, "applications.md"))
 }
 
+// reportHeaderBytes is how much of a report the URL enrichment scans.
+const reportHeaderBytes = 1000
+
+// readFileHead returns at most the first n bytes of the file at path. A file
+// shorter than n is returned whole.
+func readFileHead(path string, n int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	read, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return buf[:read], nil
+}
+
 // ParseApplications reads applications.md and returns parsed applications.
 //
 // The error is returned rather than folded into a nil slice because absent and
@@ -255,9 +275,9 @@ func ParseApplications(careerOpsPath string) ([]model.CareerApplication, error) 
 		// back to a careerOpsPath-relative path, which is what every
 		// consumer joins against. Legacy root-relative links are kept as a
 		// fallback when the resolved file does not exist.
-		if rm := reReportLink.FindStringSubmatch(at("report")); rm != nil {
-			app.ReportNumber = rm[1]
-			app.ReportPath = resolveReportPath(careerOpsPath, filePath, rm[2])
+		if link, ok := firstNumberedLink(at("report")); ok {
+			app.ReportNumber = link.label
+			app.ReportPath = resolveReportPath(careerOpsPath, filePath, link.target)
 		}
 
 		// Notes column, when present.
@@ -277,8 +297,10 @@ func ParseApplications(careerOpsPath string) ([]model.CareerApplication, error) 
 	// 3. report_num -> batch-state completed mapping (legacy)
 	// 4. scan-history.tsv (pipeline scan entries matched by company+role)
 	// 5. company name fallback from batch-input.tsv
-	batchURLs := loadBatchInputURLs(careerOpsPath)
-	reportNumURLs := loadJobURLs(careerOpsPath)
+	inputPath := batchFilePath(careerOpsPath, "batch-input.tsv")
+	statePath := batchFilePath(careerOpsPath, "batch-state.tsv")
+	batchURLs := loadBatchInputURLs(inputPath)
+	reportNumURLs := loadJobURLs(inputPath, statePath)
 
 	for i := range apps {
 		if apps[i].JobURL != "" {
@@ -288,15 +310,15 @@ func ParseApplications(careerOpsPath string) ([]model.CareerApplication, error) 
 			continue
 		}
 		fullReport := filepath.Join(careerOpsPath, apps[i].ReportPath)
-		reportContent, err := os.ReadFile(fullReport)
+		// Only the header (first 1000 bytes) is scanned, so only that much is
+		// read. This runs on every reload, including after each status change,
+		// and reading whole reports to keep 1000 bytes of each scaled with the
+		// size of every report behind a URL-less row.
+		headerBytes, err := readFileHead(fullReport, reportHeaderBytes)
 		if err != nil {
 			continue
 		}
-		header := string(reportContent)
-		// Only scan the header (first 1000 bytes) for speed
-		if len(header) > 1000 {
-			header = header[:1000]
-		}
+		header := string(headerBytes)
 
 		// Strategy 1: **URL:** in report
 		if m := reReportURL.FindStringSubmatch(header); m != nil {
@@ -325,14 +347,38 @@ func ParseApplications(careerOpsPath string) ([]model.CareerApplication, error) 
 	enrichFromScanHistory(careerOpsPath, apps)
 
 	// Strategy 5: company name fallback from batch-input.tsv
-	enrichAppURLsByCompany(careerOpsPath, apps)
+	enrichAppURLsByCompany(inputPath, apps)
 
 	return apps, nil
 }
 
+// batchFilePath returns where to read one of batch/batch-runner.sh's files,
+// batch-input.tsv or batch-state.tsv.
+//
+// The runner keeps both beside itself in the checkout, even when
+// CAREER_OPS_ROOT, CAREER_OPS_DATA_DIR or a .career-ops-data marker put the
+// data root somewhere else (#5115, #5116). Reading them only from the data
+// root found nothing under that layout, so rows that rely on the batch tiers
+// lost their job URL. The checkout's copy wins when it exists. Only when it
+// does not exist is the data root's used, which covers files kept there by
+// hand and the case where no checkout can be found. Any other stat error
+// keeps the checkout path, so the read fails instead of picking up an older
+// copy from the data root. In the default layout both are the same file.
+//
+// A FindRepoRoot error is not reported here: main.go already warns about it
+// at startup, and the data root is the path this read used before.
+func batchFilePath(careerOpsPath, name string) string {
+	if root, err := FindRepoRoot(); err == nil && root != "" {
+		checkoutPath := filepath.Join(root, "batch", name)
+		if _, statErr := os.Stat(checkoutPath); !errors.Is(statErr, fs.ErrNotExist) {
+			return checkoutPath
+		}
+	}
+	return filepath.Join(careerOpsPath, "batch", name)
+}
+
 // loadBatchInputURLs reads batch-input.tsv and returns a map of batch ID -> job URL.
-func loadBatchInputURLs(careerOpsPath string) map[string]string {
-	inputPath := filepath.Join(careerOpsPath, "batch", "batch-input.tsv")
+func loadBatchInputURLs(inputPath string) map[string]string {
 	inputData, err := os.ReadFile(inputPath)
 	if err != nil {
 		return nil
@@ -372,9 +418,8 @@ type batchEntry struct {
 // loadJobURLs reads batch TSV files and returns a map of report_num -> job URL.
 // Uses two strategies: (1) report_num mapping for completed jobs, (2) company name
 // matching as fallback for failed/missing jobs.
-func loadJobURLs(careerOpsPath string) map[string]string {
+func loadJobURLs(inputPath, statePath string) map[string]string {
 	// Read batch-input.tsv: id \t url \t source \t notes
-	inputPath := filepath.Join(careerOpsPath, "batch", "batch-input.tsv")
 	inputData, err := os.ReadFile(inputPath)
 	if err != nil {
 		return nil
@@ -418,7 +463,6 @@ func loadJobURLs(careerOpsPath string) map[string]string {
 	}
 
 	// Read batch-state.tsv: id \t url \t status \t ... \t report_num \t ...
-	statePath := filepath.Join(careerOpsPath, "batch", "batch-state.tsv")
 	stateData, err := os.ReadFile(statePath)
 	if err != nil {
 		return nil
@@ -520,8 +564,7 @@ func normalizeCompany(name string) string {
 
 // enrichAppURLsByCompany fills in JobURL for apps that didn't get one via report_num mapping.
 // It matches by company name from batch-input.tsv notes.
-func enrichAppURLsByCompany(careerOpsPath string, apps []model.CareerApplication) {
-	inputPath := filepath.Join(careerOpsPath, "batch", "batch-input.tsv")
+func enrichAppURLsByCompany(inputPath string, apps []model.CareerApplication) {
 	inputData, err := os.ReadFile(inputPath)
 	if err != nil {
 		return
@@ -775,6 +818,19 @@ type markdownLink struct {
 	target string
 }
 
+// firstNumberedLink returns the first link in a Report cell whose label is a
+// report number (`[61](../reports/061-….md)`). It walks parseMarkdownLinks so
+// a target with parentheses, such as `001-acme-(berlin)-….md`, survives whole
+// (career-ops-hq/career-ops#5482).
+func firstNumberedLink(cell string) (markdownLink, bool) {
+	for _, link := range parseMarkdownLinks(cell) {
+		if reReportLabel.MatchString(link.label) {
+			return link, true
+		}
+	}
+	return markdownLink{}, false
+}
+
 // parseMarkdownLinks returns every markdown link in value, in order. Mirrors
 // parseMarkdownLinks in tracker-parse.mjs: the label ends at the first
 // unescaped `]`, it must be followed directly by `(`, and the destination runs
@@ -1026,7 +1082,8 @@ func ComputeProgressMetrics(apps []model.CareerApplication, history ...map[int]i
 			}
 		}
 
-		if norm != "skip" && norm != "rejected" && norm != "discarded" {
+		switch norm {
+		case "applied", "responded", "assessment", "interview", "offer":
 			pm.ActiveApps++
 		}
 	}

@@ -218,8 +218,11 @@
 **URL:**
 **Archetype:** {detected}
 **Score:** {X/5}
+**القرار:** {تقدّم | فكّر | ابحث أولاً | تجاوز}
 **Legitimacy:** {High Confidence | Proceed with Caution | Suspicious}
 **PDF:** {path or pending}
+
+{جملة `## القرار (lead)` منسوخة حرفياً}
 
 ---
 

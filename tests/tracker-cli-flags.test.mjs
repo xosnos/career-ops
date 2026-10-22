@@ -181,9 +181,11 @@ for (const { args, typo } of OTHER_TYPOS) {
 //    before dispatch, not a silent fall back to the unfiltered default. ──
 const MISSING_OPERANDS = [
   { args: ['query', '--company', '--json'], flag: '--company' },
+  { args: ['query', '--company='], flag: '--company' },
   { args: ['query', '--status'], flag: '--status' },
   { args: ['history', '--id'], flag: '--id' },
   { args: ['export', '--out', '--force'], flag: '--out' },
+  { args: ['export', '--out='], flag: '--out' },
   { args: ['delete', '--num', '--dry-run'], flag: '--num' },
 ];
 for (const { args, flag } of MISSING_OPERANDS) {

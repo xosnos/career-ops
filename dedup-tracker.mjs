@@ -5,7 +5,8 @@
  * Groups by normalized company, then merges only rows whose full role title
  * matches exactly (case- and whitespace-normalized) and whose posting URLs, when
  * both rows carry one, do not conflict. Keeps entry with highest
- * score. If discarded entry had more advanced status, preserves that status.
+ * score. If discarded entry had more advanced status, preserves that status,
+ * and runs the same status hooks set-status.mjs runs (lib/status-hooks.mjs).
  * Merges notes.
  *
  * Run: node career-ops/dedup-tracker.mjs [--dry-run]
@@ -15,13 +16,12 @@ import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
-import { roleFuzzyMatch } from './role-matcher.mjs';
-import { normalizeUrl } from './url-key.mjs';
+import { postingUrlRelation } from './url-key.mjs';
 import {
-  openTrackerTransaction, rebuildRow, normalizeCompany,
-  loadCanonicalStates, resolveCanonicalStateId,
+  openTrackerTransaction, rebuildRow, normalizeCompany, companiesMatchIgnoringCorporateForm,
+  MIN_STEM_CHARS, loadCanonicalStates, resolveCanonicalStateId, resolveCanonicalState,
 } from './tracker-utils.mjs';
-import { resolveColumns, parseTrackerRow, normalizeVia, extractReqNumber } from './tracker-parse.mjs';
+import { resolveColumns, parseTrackerRow, normalizeVia, extractReqNumber, parseScore } from './tracker-parse.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
 
 const CAREER_OPS = getCareerOpsRoot();
@@ -200,16 +200,32 @@ function normalizeRole(role) {
  * Check whether two tracker rows name two different postings.
  *
  * Only two present-and-different keys are evidence: a blank or placeholder URL
- * yields no key from normalizeUrl() and is UNKNOWN, never a conflict.
+ * yields no key from normalizeUrl() and is UNKNOWN, never a conflict. Two
+ * different known languages of one page are two postings (postingUrlRelation
+ * in url-key.mjs).
  *
  * @param {object} a - First parsed applications.md row.
  * @param {object} b - Second parsed applications.md row.
- * @returns {boolean} True when both rows carry a URL and the URLs differ.
+ * @returns {boolean} True when both rows carry a URL and the URLs name two postings.
  */
 function urlsConflict(a, b) {
-  const urlA = normalizeUrl(a.url);
-  const urlB = normalizeUrl(b.url);
-  return Boolean(urlA && urlB && urlA !== urlB);
+  return postingUrlRelation(a.url, b.url) === 'distinct';
+}
+
+/**
+ * Check whether two tracker rows show the same page with a language param on
+ * one side only (`…/job/1` vs `…/job/1?lang=en`).
+ *
+ * Not proof of two postings, so the same report identity still merges them,
+ * but not proof of one either: the bare row may be the German version and the
+ * other its English one, so a role match alone must not delete either.
+ *
+ * @param {object} a - First parsed applications.md row.
+ * @param {object} b - Second parsed applications.md row.
+ * @returns {boolean}
+ */
+function languageOnOneSide(a, b) {
+  return postingUrlRelation(a.url, b.url) === 'one-sided-language';
 }
 
 /**
@@ -248,9 +264,11 @@ function reqNumsConflict(a, b) {
  *
  * Two present-and-different posting URLs veto every tier, report identity
  * included (#4562). That is the rule merge-tracker.mjs applies (`urlDiffers`),
- * through the same normalizeUrl(): two rows cannot be one application while
+ * through the same postingUrlRelation(): two rows cannot be one application while
  * naming two postings. A blank or placeholder URL yields no key and is
  * UNKNOWN, never a conflict, so rows without URLs behave exactly as before.
+ * The same page with a language param on one URL only is not a conflict, so
+ * report identity still merges it, but it blocks the role-title match.
  * Two present-and-different requisition ids in Notes (`Job id 8157736` vs
  * `Job id 8157738`, the #1524 rule) veto every tier the same way, so one title
  * posted once per city or country keeps one row per posting.
@@ -266,6 +284,7 @@ function roleMatch(a, b) {
   if (reqNumsConflict(a, b)) return false;
 
   if (sameReportIdentity(a, b)) return true;
+  if (languageOnOneSide(a, b)) return false;
   if (normalizeRole(a.role) !== normalizeRole(b.role)) return false;
 
   // Exact-title duplicates that have entered the real application pipeline are
@@ -283,20 +302,6 @@ function roleMatch(a, b) {
   }
 
   return true;
-}
-
-/**
- * Parse a tracker score cell into a numeric value for keeper selection.
- *
- * Scores may include Markdown bolding or a `/5` suffix. Dedup only needs the
- * numeric part so it can keep the highest-scored duplicate row in a cluster.
- *
- * @param {string} s - Raw score cell such as `4.3/5` or `**4.3/5**`.
- * @returns {number} Parsed score, or 0 when no number is present.
- */
-function parseScore(s) {
-  const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
-  return m ? parseFloat(m[1]) : 0;
 }
 
 /**
@@ -321,6 +326,14 @@ if (!existsSync(APPS_FILE)) {
 }
 
 let trackerTransaction = null;
+let statusHooks = null;
+let localToday = null;
+let committed = false;
+const releaseClaims = [];
+// Kept rows that take over a removed duplicate's more advanced status. Each is
+// a real status change for that row number, so it gets the status hooks once
+// the write has landed.
+const promotions = [];
 let COLMAP;
 if (!DRY_RUN) {
   try {
@@ -375,11 +388,42 @@ console.log(`📊 ${entries.length} entries loaded`);
 // Identical value at runtime, and the file stays greppable.
 // Pinned by tests/source-no-nul-bytes.test.mjs.
 const BLIND_KEY = '\u0000blind-via:';
+
+// Pre-filter bucket for the pair-wise company gate below. Rows that could name
+// one employer under a different corporate form ("Acme Widgets, APC" vs "Acme
+// Widgets") must land together so they are compared at all — normalizeCompany()
+// keeps the suffix, so keying groups on it split those pairs into two groups and
+// a duplicate re-scan survived every cleanup run (#4421 defect 4).
+// The key is the first MIN_STEM_CHARS characters of the normalized name, the
+// narrowest width that provably holds every pair sameCompany() accepts: the
+// corporate-form rule refuses a stem shorter than that, and an exact match
+// shares the whole string. A first-TOKEN key is too narrow — "Foo-Bar" and
+// "FooBar" are one employer under normalizeCompany() but tokenize to "foo" and
+// "foobar", so tokenizing split two rows that used to group and made them
+// unmergeable. Widening is free and narrowing is not: this key only decides
+// which pairs get compared, never whether they merge, so an over-wide bucket
+// costs a few extra comparisons while an over-narrow one leaves a duplicate
+// row in applications.md forever.
+function companyBucketKey(name) {
+  return normalizeCompany(name).slice(0, MIN_STEM_CHARS);
+}
+
+// True when two rows name the same employer: identical under normalizeCompany,
+// or one is the other with a corporate-form tail ("Acme Widgets" / "Acme
+// Widgets, APC"). companiesMatchIgnoringCorporateForm() is OR-ed with the
+// exact check because it returns false for two IDENTICAL names (equal token
+// length) — that is the exact tier's business. Deletion is still decided by
+// roleMatch + the status-rank guard; this only widens which pairs reach them.
+function sameCompany(a, b) {
+  return normalizeCompany(a) === normalizeCompany(b)
+    || companiesMatchIgnoringCorporateForm(a, b);
+}
+
 const groups = new Map();
 for (const entry of entries) {
   const key = String(entry.company).trim() === '?'
     ? BLIND_KEY + normalizeVia(entry.via || '')
-    : normalizeCompany(entry.company);
+    : companyBucketKey(entry.company);
   if (!groups.has(key)) groups.set(key, []);
   groups.get(key).push(entry);
 }
@@ -413,13 +457,25 @@ for (const [company, companyEntries] of groups) {
 
     for (let j = i + 1; j < companyEntries.length; j++) {
       if (processed.has(j)) continue;
+      // Named rows share a bucket, not an employer: gate the pair on the
+      // corporate-form-aware identity so suffix variants merge but two distinct
+      // employers sharing a prefix do not. The gate is against EVERY existing
+      // cluster member, not just the anchor, because corporate-form matching is
+      // not transitive: a bare "Acme" matches both "Acme Solutions" and "Acme
+      // Technologies", so anchor-only gating pulled all three into one cluster
+      // and deleted a real row even though the two tails never match each other.
+      // Requiring the whole cluster to agree leaves "Acme Technologies" in its
+      // own cluster, where it survives. Blind rows already share the Via bucket
+      // and are gated on the re-post window instead.
+      const companyOk = isBlindGroup
+        ? withinBlindWindow(companyEntries[i].date, companyEntries[j].date)
+        : cluster.every((m) => sameCompany(m.company, companyEntries[j].company));
       // roleMatch() only compares against the seed row, so a seed with no URL
       // would admit two rows naming different postings and one would be
       // deleted. Check the candidate's URL and requisition id against every
       // member already in.
-      if (roleMatch(companyEntries[i], companyEntries[j])
-          && !cluster.some(member => urlsConflict(member, companyEntries[j]) || reqNumsConflict(member, companyEntries[j]))
-          && (!isBlindGroup || withinBlindWindow(companyEntries[i].date, companyEntries[j].date))) {
+      if (companyOk && roleMatch(companyEntries[i], companyEntries[j])
+          && !cluster.some(member => urlsConflict(member, companyEntries[j]) || reqNumsConflict(member, companyEntries[j]))) {
         cluster.push(companyEntries[j]);
         processed.add(j);
       }
@@ -449,7 +505,9 @@ for (const [company, companyEntries] of groups) {
         const parts = lines[lineIdx].split('|').map(s => s.trim());
         parts[COLMAP.status] = bestStatus;
         lines[lineIdx] = rebuildRow(parts);
-        console.log(`  📝 #${keeper.num}: status promoted to "${bestStatus}" (from #${cluster.find(e => e.status === bestStatus)?.num})`);
+        const donorNum = cluster.find(e => e.status === bestStatus)?.num;
+        console.log(`  📝 #${keeper.num}: status promoted to "${bestStatus}" (from #${donorNum})`);
+        promotions.push({ keeper, from: keeper.status, to: bestStatus, donorNum });
       }
     }
 
@@ -457,6 +515,14 @@ for (const [company, companyEntries] of groups) {
     let mergedNotes = String(keeper.notes || '').trim();
     const originalNotes = mergedNotes;
     for (let k = 1; k < cluster.length; k++) {
+      const dupReport = String(cluster[k].report || '').trim();
+      const dupReportNum = extractReportNum(dupReport);
+      if (dupReportNum !== null && dupReportNum !== extractReportNum(keeper.report)) {
+        const reportNote = `also evaluated in ${dupReport}`;
+        if (!mergedNotes.includes(dupReport)) {
+          mergedNotes = mergedNotes && mergedNotes !== 'N/A' && mergedNotes !== '-' ? `${mergedNotes}; ${reportNote}` : reportNote;
+        }
+      }
       const dupNotes = String(cluster[k].notes || '').trim();
       if (dupNotes && dupNotes !== 'N/A' && dupNotes !== '❌' && dupNotes !== 'pending' && dupNotes !== '-') {
         if (!mergedNotes.includes(dupNotes)) {
@@ -500,8 +566,32 @@ console.log(`\n📊 ${removed} duplicates removed`);
 if (!DRY_RUN && removed > 0) {
   const backupPath = `${APPS_FILE}.bak`;
   copyFileSync(APPS_FILE, backupPath);
+  // Loaded only when a status moves, so a run that just drops duplicates keeps
+  // the import closure it always had.
+  if (promotions.length > 0) {
+    statusHooks = await import('./lib/status-hooks.mjs');
+    ({ localToday } = await import('./lib/local-today.mjs'));
+    for (const p of promotions) releaseClaims.push(statusHooks.claimStatusActivity(p.keeper, `dedup-tracker → ${p.to}`));
+  }
   trackerTransaction.replace(lines.join('\n'));
   console.log(`✅ Written to ${APPS_FILE} (backup: ${backupPath})`);
+  // Inside the lock window, like set-status's own append. The removed row's
+  // history stays under its old number; this row says where the kept row's
+  // status came from. dedup-tracker did not observe the transition, it found
+  // it, so funnel-velocity counts the row but keeps it out of day-math: dated
+  // today, it would otherwise read as "applied today".
+  const ledgerState = status => resolveCanonicalState(status, CANONICAL_STATES) ?? '-';
+  for (const p of promotions) {
+    statusHooks.appendStatusTransition(APPS_FILE, {
+      num: p.keeper.num,
+      date: localToday(),
+      from: ledgerState(p.from),
+      to: ledgerState(p.to),
+      source: 'dedup-tracker',
+      note: `from #${p.donorNum}`,
+    });
+  }
+  committed = true;
 } else if (DRY_RUN) {
   console.log('(dry-run — no changes written)');
 } else {
@@ -509,4 +599,19 @@ if (!DRY_RUN && removed > 0) {
 }
 } finally {
   trackerTransaction?.close();
+}
+
+// After the tracker lock is released: both hooks re-read the row this run
+// wrote, and the follow-up seeder takes its own lock.
+try {
+  if (committed) {
+    for (const p of promotions) {
+      const to = resolveCanonicalState(p.to, CANONICAL_STATES);
+      const keeper = { ...p.keeper, status: p.to };
+      if (to === 'Applied') await statusHooks.seedFollowupOnApplied(keeper.num, { trackerPath: APPS_FILE });
+      if (to === 'Interview') statusHooks.archiveJdOnInterview(keeper, { trackerPath: APPS_FILE });
+    }
+  }
+} finally {
+  for (const release of releaseClaims) release();
 }

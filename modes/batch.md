@@ -29,7 +29,7 @@ Read `spend_tier` from `config/profile.yml` (see `modes/_shared.md` -- Spend Tie
 - **`economy` tier:** No gate. The tier is already the cheapest available -- running a pre-screen on top of it adds latency without saving spend. Every job goes straight to the full evaluation.
 - This gate only applies to batch/pipeline processing. It never applies to a single interactive evaluation (the user already decided the JD is worth a look by pasting/sharing it).
 
-**Discard log (auditable):** Every posting the gate filters out MUST be logged with a one-line reason so pre-filtering is never a silent black box. Append one line to `batch/logs/discard.log` (create the file/dir if absent) in the format `{ISO8601 timestamp}\t{job id}\t{url}\t{reason}`, in addition to the `skipped` row already written to `batch-state.tsv`. This log is the visible, auditable record of what the gate discarded and why -- review it periodically to tune the North Star archetypes if the gate is too aggressive or too lax.
+**Discard log (auditable):** Every posting the gate filters out MUST be logged with a one-line reason so pre-filtering is never a silent black box. Append one line to `batch/logs/discard.log` (create the file/dir if absent) in the format `{ISO8601 timestamp}\t{job id}\t{url}\t{reason}`, in addition to the `skipped` row already written to `batch-state.tsv`. This log is the visible, auditable record of what the gate discarded and why -- review it periodically to tune the North Star archetypes if the gate is too aggressive or too lax. `node discard-analytics.mjs --log batch/logs/discard.log` summarizes it: counts by reason, domain and day, plus the most frequent `title_mismatch` URLs to check by hand.
 
 ## Files
 

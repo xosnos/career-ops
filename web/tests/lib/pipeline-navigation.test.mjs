@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pipelineQuery } from "../../src/lib/pipeline-navigation.mjs";
+import { pipelineQuery, pipelineTab } from "../../src/lib/pipeline-navigation.mjs";
 
 test("direct report visits retain the default Pipeline destination", () => {
   assert.equal(pipelineQuery({}), "");
@@ -37,4 +37,11 @@ test("repeated server search params use the same first value as the list", () =>
 
 test("empty filters do not introduce an empty query suffix", () => {
   assert.equal(pipelineQuery({ tab: "", min: undefined, q: [] }), "");
+});
+
+test("pipelineTab falls back to INBOX and reads the first repeated value", () => {
+  assert.deepEqual(
+    [pipelineTab(undefined), pipelineTab(""), pipelineTab("FOO"), pipelineTab("applied"), pipelineTab(["INBOX", "APPLIED"]), pipelineTab(["foo", "ALL"])],
+    ["INBOX", "INBOX", "INBOX", "APPLIED", "INBOX", "INBOX"],
+  );
 });

@@ -552,6 +552,9 @@ test('every repo-scanning guard enumerates through the shared definition', () =>
     'tests/local-today-gates.test.mjs',
     'tests/mojibake-canary.test.mjs',
     'tests/helpers.mjs',
+    // Walked the working tree until #5307, so a plugin installed into the
+    // gitignored plugins.local/ was graded as repository source.
+    'tests/help-flag-handled.test.mjs',
   ]) {
     const src = readFileSync(join(ROOT, caller), 'utf-8');
     assert.match(

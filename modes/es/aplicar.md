@@ -1,6 +1,6 @@
 # Modo: aplicar -- Asistente en vivo para formularios de candidatura
 
-Modo interactivo para el momento en que el candidato rellena un formulario de candidatura en Chrome. Lee lo que hay en pantalla, carga el contexto de la evaluación previa de la oferta y genera respuestas personalizadas para cada pregunta del formulario.
+Modo interactivo para el momento en que el candidato rellena un formulario de candidatura en el navegador Playwright que lanza este proyecto. Lee lo que hay en pantalla, carga el contexto de la evaluación previa de la oferta y genera respuestas personalizadas para cada pregunta del formulario.
 
 ## Requisitos previos
 
@@ -10,7 +10,7 @@ Modo interactivo para el momento en que el candidato rellena un formulario de ca
 ## Workflow
 
 ```
-1. DETECTAR     -> Leer la pestaña activa de Chrome (captura/URL/título)
+1. DETECTAR     -> Abrir la oferta en el navegador Playwright de este proyecto
 2. IDENTIFICAR  -> Extraer empresa + rol desde la página
 3. BUSCAR       -> Hacer match con los reports existentes en reports/
 4. CARGAR       -> Leer el report completo + Bloque G (si existe)
@@ -20,9 +20,14 @@ Modo interactivo para el momento en que el candidato rellena un formulario de ca
 8. PRESENTAR    -> Mostrar las respuestas formateadas para copiar y pegar
 ```
 
+## Scope
+
+Follow the Scope section in `modes/apply.md`. Run `node apply-scope.mjs root` and stay inside the directories it prints. Launch with `node apply-scope.mjs launch-options`. Do not read `DevToolsActivePort` or attach to an existing browser. Do not submit the form.
+
+
 ## Paso 1 -- Detectar la oferta
 
-**Con Playwright:** Snapshot de la página activa. Leer título, URL y contenido visible.
+**Con Playwright:** Ejecutar `node apply-scope.mjs launch-options`, abrir la oferta en esa ventana y leer título, URL y contenido visible.
 
 **Sin Playwright:** Pedir al candidato que:
 - Comparta una captura de pantalla del formulario (la herramienta Read lee imágenes)
@@ -104,7 +109,7 @@ Notas:
 ## Paso 6 -- Tras la candidatura (opcional)
 
 Si el candidato confirma que la candidatura ha sido enviada:
-1. Actualizar el estado a "Applied" con el CLI canónico: `node set-status.mjs <report#> Applied` (no editar la tabla de `applications.md` a mano)
+1. Actualizar el estado a "Applied" con el CLI canónico: `node set-status.mjs --report <report#> Applied` (no editar la tabla de `applications.md` a mano)
 2. Actualizar el Bloque G del report con las respuestas finales
 3. Sugerir el siguiente paso: `/career-ops contacto` para LinkedIn outreach hacia el hiring manager
 

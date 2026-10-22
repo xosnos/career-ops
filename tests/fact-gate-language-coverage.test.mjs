@@ -111,6 +111,42 @@ test('German counts are read by the lexicon, so an inflation blocks', () => {
   assert.deepEqual([...ok.invented], []);
 });
 
+test('unlisted noun next to a listed one remains unreported — remaining gap (#5125)', () => {
+  // When a line mixes an unlisted noun with a listed one, the listed match
+  // silences the coverage warning while the unlisted noun stays unchecked (#5125).
+  const r = verifyFacts('Leitete 45 Spezialisten in 3 Standorten.', BARE);
+  assert.equal(r.verdict, 'block');
+  assert.deepEqual([...r.invented], ['3 locations']);
+  assert.equal(r.coverage, null);
+
+  const dir = mkdtempSync(join(tmpdir(), 'fact-gap-de-'));
+  const source = join(dir, 'cv.md');
+  writeFileSync(source, 'Managed 45 specialists in 3 locations.');
+  const ok = verifyFacts('Leitete 45 Spezialisten in 3 Standorten.', { ...BARE, sourcePaths: [source] });
+  assert.equal(ok.verdict, 'pass');
+  assert.deepEqual([...ok.invented], []);
+  assert.equal(ok.coverage, null);
+});
+
+test('German headcount, user, and engineering inflections fold to canonical nouns (#5125)', () => {
+  assert.deepEqual([...verifyFacts('45 Nutzer.', BARE).invented], ['45 users']);
+  assert.deepEqual([...verifyFacts('12 Entwicklerinnen.', BARE).invented], ['12 engineers']);
+  assert.deepEqual([...verifyFacts('8 Ingenieuren.', BARE).invented], ['8 engineers']);
+
+  const r = verifyFacts('45 Nutzer, 12 Entwicklerinnen, 8 Ingenieuren.', BARE);
+  assert.equal(r.verdict, 'block');
+  assert.deepEqual([...r.invented].sort(), ['12 engineers', '45 users', '8 engineers']);
+  assert.equal(r.coverage, null);
+
+  const dir = mkdtempSync(join(tmpdir(), 'fact-de-inflections-'));
+  const source = join(dir, 'cv.md');
+  writeFileSync(source, 'Supported 45 users, 12 engineers, and 8 engineers.');
+  const ok = verifyFacts('45 Nutzer, 12 Entwicklerinnen, 8 Ingenieuren.', { ...BARE, sourcePaths: [source] });
+  assert.equal(ok.verdict, 'pass');
+  assert.deepEqual([...ok.invented], []);
+  assert.equal(ok.coverage, null);
+});
+
 test('one recognised count silences the warning — the documented under-report', () => {
   // French "sites" collides with the English noun, so the gate reaches one count
   // and the rest stay invisible. Asserted so the limitation is a decision on

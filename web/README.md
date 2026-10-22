@@ -16,11 +16,18 @@ Requires Node 22.6+ (see [Tests](#tests) — `npm test` needs glob discovery, an
 ```bash
 cd web
 npm ci
-npm run dev
+npm run build
+npm start
 ```
 
 Open http://localhost:3000. The app reads the career-ops checkout it lives in
 (the parent directory) — your existing CV, pipeline and reports appear as-is.
+
+`npm start` serves the production build, which is the one to use day to day.
+Run `npm run build` again after updating career-ops so the app picks up the new
+code. `npm run dev` is for working on the web UI itself (see
+[Development](#development)): it compiles each page on first visit and checks
+for changes as you go, so it is noticeably slower to use.
 
 The server binds IPv4 loopback, so reach it as `localhost` or `127.0.0.1`;
 `http://[::1]:3000` has nothing listening on it.
@@ -32,7 +39,7 @@ The server binds IPv4 loopback, so reach it as `localhost` or `127.0.0.1`;
 - **Explore** — the free reverse-ATS scan with an honest partial-dataset
   indicator, plus AI-assisted discovery (bring your own CLI/keys, including Grok Build CLI).
 - **Scheduled scans** — save local zero-token or full-dataset scans and run due
-  jobs through an optional Windows Task Scheduler worker.
+  jobs through an optional worker on Windows, macOS or Linux.
 - **Apply** — assisted form prefill with a hard rule inherited from the core:
   **it never submits for you** — you always press the button.
 - **Today / Analytics / CV / Config** — action queue, funnel + pipeline Sankey,
@@ -61,18 +68,25 @@ The server binds IPv4 loopback, so reach it as `localhost` or `127.0.0.1`;
 - **Additive:** the web is isolated from the core's packaging, CI and release
   automation. The CLI works exactly the same without it.
 
-## Scheduled scans on Windows
+## Scheduled scans
 
-Automatic recurring scans through Task Scheduler are Windows-only. On macOS and Linux,
-saved scans run only when you choose **Run now** on the Scheduled scans page.
 The web UI can save scan definitions without installing an OS task. To check and
-run due jobs every 15 minutes, install the local worker from the repository root:
+run due jobs every 15 minutes, install the local worker from the repository root.
+On Windows:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File web/scripts/install-scan-schedule.ps1
 ```
 
-Remove it with `web/scripts/uninstall-scan-schedule.ps1`. It runs in the current user's interactive session, so the user must be logged in. The task runs only
+On macOS and Linux:
+
+```sh
+sh web/scripts/install-scan-schedule.sh
+```
+
+Remove it with `web/scripts/uninstall-scan-schedule.ps1` on Windows or
+`sh web/scripts/uninstall-scan-schedule.sh` on macOS and Linux. It runs as the
+current user (never as root), and Windows and macOS need a logged-in session. The task runs only
 `web/scripts/scheduled-jobs-runner.mjs`; it never evaluates roles, applies, or invokes
 an AI model. Job definitions and run history stay in the gitignored `data/`
 directory.

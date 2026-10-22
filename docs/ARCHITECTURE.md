@@ -51,7 +51,8 @@ system/user data-contract layers live in [../ARCHITECTURE.md](../ARCHITECTURE.md
    - F: Interview prep (STAR stories)
    - G: Posting legitimacy (scam / ghost-job signals)
    - H: Draft application answers (only when the score is 4.5 or above)
-5. **Score**: Weighted average across 5 dimensions (1-5)
+5. **Score**: One global score (1-5), a holistic judgment across 5 dimensions
+   with no arithmetic formula; blocks A-H are not averaged (`modes/_shared.md` → Scoring System)
 6. **Report**: Save as `reports/{num}-{company}-{date}.md`
 7. **PDF**: Generate ATS-optimized CV (`generate-pdf.mjs`)
 8. **Track**: New entries via TSV in `batch/tracker-additions/` merged by
@@ -90,7 +91,7 @@ templates/cv-template.html → PDF generation template
 ## File Naming Conventions
 
 - Reports: `{###}-{company-slug}-{YYYY-MM-DD}.md` (3-digit zero-padded)
-- PDFs: `cv-candidate-{company-slug}-{YYYY-MM-DD}.pdf`
+- PDFs: `cv-candidate-{report-num}-{company-slug}-{YYYY-MM-DD}.pdf`
 - Tracker TSVs: `batch/tracker-additions/{id}.tsv`
 
 ## Pipeline Integrity
@@ -110,8 +111,8 @@ Scripts maintain data consistency:
 
 The `dashboard/` directory contains a standalone Go TUI application that visualizes the pipeline:
 
-- Filter tabs: All, Evaluada, Aplicado, Entrevista, Top >=4, No Aplicar
-- Sort modes: Score, Date, Company, Status
+- Filter tabs: All, Evaluated, Interview, Assessment, Responded, Applied, Top ≥4, Skip, Rejected, Discarded
+- Sort modes: Score, Date, Company, Status, Location, Pay, Last contact, Posted
 - Grouped/flat view
 - Lazy-loaded report previews
 - Inline status picker

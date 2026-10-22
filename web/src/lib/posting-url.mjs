@@ -49,18 +49,19 @@ function linkDestination(raw) {
 }
 
 /**
- * First http(s) markdown-link target in a tracker cell.
+ * Every markdown-link target in a tracker cell, in order.
  * The walk matches tracker-parse.mjs `parseMarkdownLinks`: the label ends at
  * an unescaped `]`, the destination ends at the matching `)`, and a `\` skips
  * the next character.
  * @param {string} value
- * @returns {string|null}
+ * @returns {string[]}
  */
-function firstHttpMarkdownTarget(value) {
+function markdownLinkTargets(value) {
+  const targets = [];
   let cursor = 0;
   while (cursor < value.length) {
     const labelStart = value.indexOf("[", cursor);
-    if (labelStart === -1) return null;
+    if (labelStart === -1) break;
 
     let labelEnd = -1;
     for (let i = labelStart + 1; i < value.length; i++) {
@@ -91,11 +92,34 @@ function firstHttpMarkdownTarget(value) {
     }
 
     const target = linkDestination(value.slice(labelEnd + 2, linkEnd));
-    const href = target == null ? "" : String(target).trim().replace(/^<|>$/g, "");
-    if (/^https?:\/\//i.test(href)) return href;
+    if (target != null) targets.push(target);
     cursor = linkEnd + 1;
   }
-  return null;
+  return targets;
+}
+
+/**
+ * First http(s) markdown-link target in a tracker cell.
+ * @param {string} value
+ * @returns {string|null}
+ */
+function firstHttpMarkdownTarget(value) {
+  // The `<…>` strip mirrors tracker-parse.mjs `extractCellUrl`, so both read
+  // the same href from a URL cell.
+  const hrefs = markdownLinkTargets(value).map((target) => String(target).trim().replace(/^<|>$/g, ""));
+  return hrefs.find((href) => /^https?:\/\//i.test(href)) ?? null;
+}
+
+/**
+ * First markdown-link target in a tracker cell, such as the report path in
+ * `[1](../reports/001-acme-(berlin)-2026-10-01.md)`, or null when the cell
+ * holds no link. Balanced parentheses stay in the target (#5482). Same result
+ * as tracker-parse.mjs `firstLinkTarget`.
+ * @param {string | null | undefined} cell
+ * @returns {string|null}
+ */
+export function firstMarkdownLinkTarget(cell) {
+  return markdownLinkTargets(String(cell ?? ""))[0] ?? null;
 }
 
 /**
@@ -109,15 +133,29 @@ function firstHttpMarkdownTarget(value) {
 export function readTrackerUrl(cell) {
   const value = String(cell ?? "").trim();
   if (!value) return "";
+  // A value that is already a URL was extracted before (tracker-table.mjs
+  // applies this reader to r.url). Parsing it again could pick up a link
+  // nested inside its path and swap in a different posting.
+  if (isBareHttpUrl(value)) return value;
   return firstHttpMarkdownTarget(value) ?? value;
 }
 
-/** Href from a tracker URL cell. Empty when the cell is not an http(s) URL. */
+/** True when the value starts with an http(s) scheme. */
+function isBareHttpUrl(value) {
+  return /^https?:\/\//i.test(value);
+}
+
+/**
+ * Href from a tracker URL cell. Empty when the cell is not an http(s) URL.
+ * A bare URL stops at the first space, so trailing text is dropped. A link
+ * destination is kept whole, since an escaped space or a space inside
+ * balanced parentheses is part of it.
+ */
 export function postingHref(cell) {
-  const value = readTrackerUrl(cell);
+  const value = String(cell ?? "").trim();
   if (!value || value === "—" || value === "-") return "";
-  if (/^https?:\/\//i.test(value)) return value.split(/\s/)[0];
-  return "";
+  if (isBareHttpUrl(value)) return value.split(/\s/)[0];
+  return firstHttpMarkdownTarget(value) ?? "";
 }
 
 /** Short label for a posting link. The host, without a leading www. */
