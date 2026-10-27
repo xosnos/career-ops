@@ -5,10 +5,20 @@ Use this when the host can't install Playwright/Chromium directly (e.g. Ubuntu
 laptops). The image is based on Microsoft's official Playwright image, which
 ships Chromium preinstalled and works on any Linux kernel Docker supports.
 
-No feature is dropped: PDF generation, scanner, liveness checker, dashboard
-(Go), batch workers, update system — everything runs inside the container.
-Your project directory is bind-mounted, so reports, CVs, profile, tracker, and
-all generated artifacts live on the host as before.
+The container runs the project's scripts: PDF generation, scanner, liveness
+checker, dashboard (Go), LaTeX, the API-key evaluators (`./cops gemini:eval`)
+and the update system. Your project directory is bind-mounted, so reports, CVs,
+profile, tracker, and all generated artifacts live on the host as before.
+
+**The image has no AI coding CLI.** Claude Code, Codex, OpenCode, Gemini CLI
+and the others are not installed in it, so the agent modes (evaluating a pasted
+job, tailoring a CV, `apply`) run in the CLI on your host. Those modes call
+scripts such as `node generate-pdf.mjs` and `node check-liveness.mjs` directly,
+with the host's Node, so on a host where Playwright can't run, those steps fail
+just as they would without Docker. When one does, run the script yourself
+through `./cops`, for example `./cops pdf output/cv.html output/cv.pdf`.
+Batch mode (`batch/batch-runner.sh`) starts a worker CLI for every offer, so it
+can't run inside the container at all.
 
 ## Prerequisites
 
@@ -112,7 +122,8 @@ new packages.
 **`docker: not found`** — install Docker Engine + Compose plugin first.
 
 **Playwright still complains** — you're running the host's Node, not the
-container's. Always go through `./cops`.
+container's. Always go through `./cops`. That includes a script an AI CLI on
+the host ran for you: run it again with `./cops node <script>`.
 
 **Permission errors on generated files** — the container runs as root by
 default. If host files end up root-owned, either:

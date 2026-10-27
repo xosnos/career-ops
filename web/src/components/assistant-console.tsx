@@ -21,7 +21,9 @@ import { pendingActOpenerStart } from "@/lib/act-envelope.mjs";
 import { cleanMessages } from "@/lib/assistant-history.mjs";
 import { StatusConfirmationCard, type StatusConfirmationPart } from "@/components/assistant-status-confirmation";
 import { StatusWriteError, writeAssistantStatus } from "@/lib/assistant-status-write.mjs";
+import { postAssistantWrite } from "@/lib/assistant-file-write.mjs";
 import { cn } from "@/lib/cn";
+import { CONFIG_KEY, subscribeConfig } from "@/lib/config-events.mjs";
 
 // ── message model: messages are PART arrays so a live worker card can render
 // inline next to text, both fed by the single JobsProvider store ──────────────
@@ -30,12 +32,11 @@ type Part =
   | { type: "note"; text: string }
   | { type: "card"; jobId: string }
   | { type: "batch"; batchId: string; jobIds: string[] }
-  | { type: "confirm"; cid: string; summary: string; state: "pending" | "done" | "cancelled"; statusChange?: undefined }
+  | { type: "confirm"; cid: string; summary: string; state: "pending" | "saving" | "done" | "cancelled" | "failed"; message?: string; statusChange?: undefined }
   | StatusConfirmationPart;
 type Msg = { role: "user" | "assistant"; parts: Part[] };
 type RequestFeedback = { id: number; phase: "working" | "ready" | "error"; announce: boolean };
 
-const CONFIG_KEY = "career-ops:config";
 const CHAT_KEY = "career-ops:chat";
 const SIZE_KEY = "career-ops:assistant-size";
 
@@ -277,7 +278,7 @@ export function AssistantConsole() {
     }
   }, [open]);
 
-  // selected CLI from Config (reacts to changes in other tabs)
+  // Selected CLI from Config, including saves in this tab.
   useEffect(() => {
     function read() {
       try {
@@ -288,8 +289,7 @@ export function AssistantConsole() {
       }
     }
     read();
-    window.addEventListener("storage", read);
-    return () => window.removeEventListener("storage", read);
+    return subscribeConfig(window, read);
   }, []);
 
   async function chatRequest(url: string, init?: RequestInit) {
@@ -538,14 +538,17 @@ export function AssistantConsole() {
         setTimeout(() => applyRef.current.open(u), 60);
       },
       applyExplore: (patch, opts) => exploreRef.current.applyPatch(patch, opts),
-      writeProfile: (patch) => {
-        fetch("/api/profile", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
-          .then(() => router.refresh())
-          .catch(() => {});
-      },
-      writePortals: (roles, location) => {
-        fetch("/api/portals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles, location }) }).catch(() => {});
-      },
+      // A refused or failed write must not pass for a saved one: the route
+      // answers 4xx/5xx with the reason, and resolveConfirm puts it on the card.
+      writeProfile: (patch) =>
+        postAssistantWrite("/api/profile", patch).then((failure) => {
+          if (!failure) router.refresh();
+          return failure ? `Your profile was NOT saved: ${failure}.` : null;
+        }),
+      writePortals: (roles, location) =>
+        postAssistantWrite("/api/portals", { roles, location }).then((failure) =>
+          failure ? `Your scan targets were NOT saved: ${failure}.` : null,
+        ),
       writePersonalization: (patch) => {
         fetch("/api/personalization", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
           .then(async (r) => {
@@ -615,11 +618,23 @@ export function AssistantConsole() {
     const run = confirmRuns.current.get(cid);
     confirmRuns.current.delete(cid);
     const info = accept && run ? run() : null;
+    // A write card stays "saving" until its write settles, so a chat saved in
+    // between records it as unconfirmed, never done. Matched by cid, so a write
+    // that settles after the user switched chats updates only the card that
+    // started it, never the chat now on screen.
+    void info?.failure
+      ?.catch(() => "The write could not be confirmed.")
+      .then((message) => {
+        setMessages((ms) => ms.map((m) => ({ ...m,
+          parts: m.parts.map((p) => p.type === "confirm" && !p.statusChange && p.cid === cid
+            ? (message ? { ...p, state: "failed" as const, message } : { ...p, state: "done" as const }) : p),
+        })));
+      });
     setMessages((ms) =>
       ms.map((m) => {
         if (!m.parts.some((p) => p.type === "confirm" && p.cid === cid)) return m;
         const parts: Part[] = m.parts.map((p) =>
-          p.type === "confirm" && p.cid === cid ? { ...p, state: accept ? "done" : "cancelled" } : p,
+          p.type === "confirm" && p.cid === cid ? { ...p, state: !accept ? "cancelled" : info?.failure ? "saving" : "done" } : p,
         );
         if (info?.jobIds?.length) {
           if (info.batchId && info.jobIds.length > 1) parts.push({ type: "batch", batchId: info.batchId, jobIds: info.jobIds });
@@ -1109,7 +1124,9 @@ function ConfirmationCard({ part, onConfirm }: {
         </div>
       ) : (
         <div ref={resultRef} tabIndex={-1} aria-labelledby={`${summaryId} ${resultId}`} className="mt-1 rounded text-xs text-faint focus-visible:outline-2 focus-visible:outline-brand">
-          <span id={resultId}>{part.state === "done" ? "✓ started" : "cancelled"}</span>
+          <span id={resultId} role={part.state === "failed" ? "alert" : undefined} className={part.state === "failed" ? "text-red-600 dark:text-red-400" : undefined}>
+            {part.state === "done" ? "✓ started" : part.state === "saving" ? "saving…" : part.state === "failed" ? part.message : "cancelled"}
+          </span>
         </div>
       )}
     </div>

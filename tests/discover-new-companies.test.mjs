@@ -119,6 +119,50 @@ for (const args of [
   ok(`${args.join(' ')} rejects a duplicate value option`, duplicateExit !== 0);
 }
 
+// ── 1b. --flag=value form ───────────────────────────────────────────────────
+console.log('\n--- 1b. --flag=value form ---');
+
+{
+  const history = [
+    row({ company: 'Acme', status: 'added' }),
+    row({ company: 'Acme' }),
+    row({ company: 'Globex' }),
+    row({ company: 'Globex' }),
+  ];
+  const spaced = run(history, {}, ['--since', '7', '--min-rows', '1', '--json']);
+  const equals = run(history, {}, ['--since=7', '--min-rows=1', '--json']);
+  eq('--since=7 --min-rows=1 matches --since 7 --min-rows 1',
+    equals.companies.map((c) => c.name).sort(), spaced.companies.map((c) => c.name).sort());
+}
+
+{
+  let exit = 0;
+  try { run([row({ company: 'Acme' })], {}, ['--limit=100', '--json']); }
+  catch (e) { exit = e.status; }
+  ok('--limit=100 works', exit === 0);
+}
+
+{
+  let exit = 0;
+  try { run([row({ company: 'Acme' })], {}, ['--out=/tmp/dnc-out.yml', '--json']); }
+  catch (e) { exit = e.status; }
+  ok('--out=/tmp/dnc-out.yml does not break JSON output', exit === 0);
+}
+
+{
+  let exit = 0;
+  try { run([row({ company: 'Acme' })], {}, ['--since=', '--json']); }
+  catch (e) { exit = e.status; }
+  ok('--since= (empty value) exits non-zero', exit !== 0);
+}
+
+{
+  let exit = 0;
+  try { run([row({ company: 'Acme' })], {}, ['--since=abc', '--json']); }
+  catch (e) { exit = e.status; }
+  ok('--since=abc exits non-zero', exit !== 0);
+}
+
 {
   const dataRoot = mkdtempSync(join(tmpdir(), 'discover-new-root-'));
   const decoyCwd = mkdtempSync(join(tmpdir(), 'discover-new-cwd-'));

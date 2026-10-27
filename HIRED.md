@@ -15,6 +15,27 @@ nothing leaves your machine until you press Submit yourself).
 
 <!-- ENTRIES -->
 
+<!-- hire n=20 level=handle handle=bluezeb12 role="Database Systems Engineer" sector="Contracting Firm" geo="remote US" weeks=9 link="https://github.com/career-ops-hq/career-ops/issues/5921" -->
+### Hire #20
+
+> Applied through career-ops targeting health tech and federal systems. The initial application opened up a referral for a remote contracting role as a Database Systems Engineer supp
+
+<a href="https://github.com/bluezeb12"><img src="https://github.com/bluezeb12.png?size=64" width="28" height="28" align="top" alt="@bluezeb12"> **@bluezeb12**</a> · Database Systems Engineer · remote US · 9 weeks · [story →](https://github.com/career-ops-hq/career-ops/issues/5921)
+
+<!-- hire n=19 level=role role="Project Manager" sector="Mid Size Tech - Health" geo="Hibrid - Brazil" link="https://github.com/career-ops-hq/career-ops/issues/5786" -->
+### Hire #19
+
+> Career-Ops changed the game and completely switched my approach to jobhunt. Interviews started to appear because my career facts were being finally shown in my curriculum and I had
+
+**Project Manager** · Mid Size Tech - Health · Hibrid - Brazil · [story →](https://github.com/career-ops-hq/career-ops/issues/5786)
+
+<!-- hire n=18 level=handle handle=bravely role="Technical Lead Software Engineer" sector="Remote-first Health-tech Startup" geo="Remote US" weeks=22 link="https://github.com/career-ops-hq/career-ops/issues/5761" -->
+### Hire #18
+
+> `career-ops` was such a game changer, I'll never job hunt without it (or something like it) ever again. The portal scan/auto-evaluation pipeline made combing through jobs a breeze
+
+<a href="https://github.com/bravely"><img src="https://github.com/bravely.png?size=64" width="28" height="28" align="top" alt="@bravely"> **@bravely**</a> · Technical Lead Software Engineer · Remote US · 22 weeks · [story →](https://github.com/career-ops-hq/career-ops/issues/5761)
+
 <!-- hire n=17 level=handle handle=inesp role="Product Engineer" sector="remote-first, series D startup" geo="remote EU" weeks=6 link="https://github.com/career-ops-hq/career-ops/issues/5397" -->
 ### Hire #17
 

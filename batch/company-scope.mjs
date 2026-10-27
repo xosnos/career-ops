@@ -10,6 +10,9 @@
  *   - the company half of the notes column ("Company - Role" when the notes use
  *     that shape, otherwise the whole notes text), or
  *   - the posting URL (so `--company acme` finds boards.greenhouse.io/acme/...).
+ *     On a shared ATS host (ats-vendor.mjs ATS_HOST_PATTERNS) the vendor's own
+ *     domain is left out, so `--company Lever` does not pick every posting on
+ *     jobs.lever.co; the tenant subdomain and the path still count.
  * Comparison uses tracker-utils.mjs normalizeCompany (case and punctuation
  * folded, any script kept), so "Acme Corp." matches "acme corp" and "AcmeCorp".
  */
@@ -17,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import { isMainModule } from '../lib/is-main-module.mjs';
 import { flagValue, validateFlags } from '../lib/cli-flags.mjs';
 import { normalizeCompany } from '../tracker-utils.mjs';
+import { atsVendorOf, KNOWN_ATS_VENDORS } from '../ats-vendor.mjs';
 
 /** Split a comma-separated CLI value into normalised keys, dropping blanks. */
 export function requestedLabels(value) {
@@ -30,9 +34,23 @@ export function companyOfNotes(notes) {
   return i < 0 ? text : text.slice(0, i);
 }
 
+/**
+ * The part of a posting URL that can name the employer. On a known shared ATS
+ * the vendor domain (its last two host labels: lever.co, myworkdayjobs.com…)
+ * names the platform, not the company, so only the tenant subdomain, the path
+ * and the query are kept. Any other URL is used whole.
+ */
+export function companyOfUrl(url) {
+  const text = String(url ?? '');
+  if (!KNOWN_ATS_VENDORS.includes(atsVendorOf(text))) return text;
+  const { hostname, pathname, search } = new URL(text.trim());
+  const tenant = hostname.split('.').slice(0, -2).join('.');
+  return `${tenant} ${pathname} ${search}`;
+}
+
 export function matchesCompany({ url = '', notes = '' }, wanted) {
   if (wanted.length === 0) return true;
-  const hay = [normalizeCompany(companyOfNotes(notes)), normalizeCompany(url)];
+  const hay = [normalizeCompany(companyOfNotes(notes)), normalizeCompany(companyOfUrl(url))];
   return wanted.some((w) => hay.some((h) => h.includes(w)));
 }
 

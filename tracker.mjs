@@ -40,7 +40,7 @@
  * Usage:
  *   node tracker.mjs sync [--check]             # (re)build applications.db from applications.md
  *                                               # --check: diagnose only, no write; exit 1 if issues found
- *   node tracker.mjs query [--status Applied] [--company acme] [--role designer]
+ *   node tracker.mjs query [--status Applied] [--company acme] [--role designer] [--csv]
  *                          [--since 2026-01-01] [--min-score 4] [--id N] [--limit 20] [--json]
  *   node tracker.mjs history --id N             # status transitions: the ledger's, plus changes only a sync saw
  *   node tracker.mjs export [--out FILE] [--force]  # inverse: applications.db → markdown (stdout by default)
@@ -60,7 +60,7 @@ import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { loadYaml } from './lib/yaml-document.mjs';
 import {
-  resolveColumns, detectColumns, isHeaderRow, isSeparatorRow, LEGACY_COLMAP,
+  resolveColumns, detectColumns, isHeaderRow, isSeparatorRow, LEGACY_COLMAP, firstLinkTarget,
 } from './tracker-parse.mjs';
 import {
   canonicalizeTrackerPath, openTrackerTransaction, writeFileAtomic, loadCanonicalStates,
@@ -68,6 +68,7 @@ import {
 import { parseStatusLog, foldObservations } from './funnel-velocity.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
+import { escapeFormulaCell } from './lib/tsv-formula-escape.mjs';
 
 /**
  * Where the derived SQLite index lives for a given tracker.
@@ -831,7 +832,45 @@ function rowToMarkdown(r) {
   return `| ${r.id} | ${cleanCell(r.date)} | ${cleanCell(r.company)} | ${cleanCell(r.role)} | ${cleanCell(r.score)} | ${cleanCell(r.status)} | ${cleanCell(r.pdf)} | ${cleanCell(r.report)} | ${cleanCell(r.notes)} |`;
 }
 
+// A spreadsheet sorts and filters on values, so `query --csv` parses the score,
+// PDF and report cells out of their markdown.
+const CSV_COLUMNS = [
+  ['id', (r) => r.id],
+  ['date', (r) => r.date],
+  ['company', (r) => r.company],
+  ['role', (r) => r.role],
+  ['score', (r) => csvScore(r.score)],
+  ['status', (r) => r.status],
+  ['pdf', (r) => (String(r.pdf ?? '').includes('✅') ? 'yes' : 'no')],
+  ['report', (r) => csvReport(r.report)],
+  ['notes', (r) => r.notes],
+];
+
+function csvScore(cell) {
+  const m = String(cell ?? '').replace(/\*\*/g, '').trim().match(/^(\d+(?:[.,]\d+)?)(?:\/5)?(?:\s.*)?$/);
+  return m ? Number(m[1].replace(',', '.')) : '';
+}
+
+function csvReport(cell) {
+  const text = String(cell ?? '').trim();
+  return firstLinkTarget(text) ?? (text === '—' || text === '-' ? '' : text);
+}
+
+function csvField(value) {
+  const cell = escapeFormulaCell(value);
+  return /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+}
+
+function rowToCsv(r) {
+  return CSV_COLUMNS.map(([, read]) => csvField(read(r))).join(',');
+}
+
 async function query(args, ctx) {
+  if (args.includes('--csv') && args.includes('--json')) {
+    ctx.error('Error: --csv and --json are two output formats; pass one');
+    throw new TrackerExit(1);
+  }
+
   const DatabaseSync = await loadSqlite(ctx);
   const db = ctx.openDb(DatabaseSync);
   const states = loadStates(ctx);
@@ -876,6 +915,9 @@ async function query(args, ctx) {
   const rows = db.prepare(sql).all(...params);
   if (args.includes('--json')) {
     ctx.log(JSON.stringify(rows, null, 2));
+  } else if (args.includes('--csv')) {
+    ctx.log(CSV_COLUMNS.map(([name]) => name).join(','));
+    for (const r of rows) ctx.log(rowToCsv(r));
   } else {
     ctx.log(HEADER);
     ctx.log(SEPARATOR);
@@ -1171,9 +1213,6 @@ async function deleteApp(args, ctx) {
 
 const COMMANDS = { sync, query, history, export: exportMd, delete: deleteApp };
 
-const TOP_LEVEL_USAGE = 'Usage: node tracker.mjs <sync|query|history|export|delete> [flags]\n'
-  + 'See the header comment of this file for examples, or docs/SCRIPTS.md.';
-
 // Every flag each subcommand accepts, from the header comment (lines 24-32).
 // #4602: unvalidated flags let a mistyped `--dryrun` (missing the hyphen)
 // fall through `delete`'s `args.includes('--dry-run')` check unseen, so the
@@ -1190,10 +1229,11 @@ const SUBCOMMAND_FLAGS = {
       + '  --check: diagnose only, no write; exit 1 if issues found',
   },
   query: {
-    known: ['--status', '--company', '--role', '--since', '--min-score', '--id', '--limit', '--json', '--help', '-h'],
+    known: ['--status', '--company', '--role', '--since', '--min-score', '--id', '--limit', '--json', '--csv', '--help', '-h'],
     valueFlags: ['--status', '--company', '--role', '--since', '--min-score', '--id', '--limit'],
     usage: 'Usage: node tracker.mjs query [--status Applied] [--company acme] [--role designer]\n'
-      + '                              [--since 2026-01-01] [--min-score 4] [--id N] [--limit 20] [--json]',
+      + '                              [--since 2026-01-01] [--min-score 4] [--id N] [--limit 20] [--json | --csv]\n'
+      + '  --csv: one spreadsheet row per application (numeric score, yes/no pdf, report path)',
   },
   history: {
     known: ['--id', '--help', '-h'],
@@ -1215,6 +1255,12 @@ const SUBCOMMAND_FLAGS = {
       + '  remove one application row from applications.md + reindex',
   },
 };
+
+const TOP_LEVEL_USAGE = [
+  'Usage: node tracker.mjs <sync|query|history|export|delete> [flags]',
+  ...Object.values(SUBCOMMAND_FLAGS).map(({ usage }) => usage),
+  'node tracker.mjs <command> --help prints one command. More examples: docs/SCRIPTS.md.',
+].join('\n\n');
 
 /**
  * Run one tracker.mjs command against the paths given, in-process.

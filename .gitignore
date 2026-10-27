@@ -228,6 +228,9 @@ opencode.json
 # personal server credentials (e.g. a plugin's API token) once a user adds
 # an MCP server, same risk class as .env.
 .mcp.json
+# Hermes Agent personal project rules. docs/HERMES.md offers it as a way to
+# supply rules that override AGENTS.md without sharing them with the repository.
+.hermes.md
 career-dashboard
 career-dashboard.exe
 package-lock.json

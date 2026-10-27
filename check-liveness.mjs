@@ -30,7 +30,7 @@ import {
   sleep,
 } from './liveness-browser.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
-import { planExpiredHistoryRows, trackerLivenessTargets, DEFAULT_TRACKER_STATUSES, planExpiredDiscards, postingClosedNote, DEFAULT_DISCARD_STATUSES } from './liveness-core.mjs';
+import { planExpiredHistoryRows, trackerLivenessTargets, DEFAULT_TRACKER_STATUSES, planExpiredDiscards, postingClosedNote, DEFAULT_DISCARD_STATUSES, discardableExpiredUrls } from './liveness-core.mjs';
 import { appendToScanHistory, normalizeUrlForDedup, SCAN_HISTORY_PATH } from './scan.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
@@ -38,6 +38,7 @@ import { localToday } from './lib/local-today.mjs';
 import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { flagValue, hasFlag } from './lib/cli-flags.mjs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
@@ -175,12 +176,26 @@ async function main() {
   const throttleArg = args.find((a) => a === '--throttle' || a.startsWith('--throttle='));
   const throttleBaseMs = throttleArg ? (Number(throttleArg.split('=')[1]) || 5000) : 0;
   const record = recordingEnabled(args);
-  const statusArg = args.find((a) => a.startsWith('--status='));
+  // `--status Rejected` as well as `--status=Rejected`. Only the `=` form was
+  // read, so the space form, and any `--status` with no value, fell back to
+  // the default statuses without a word, and `--discard-expired --apply`
+  // then rewrote Evaluated and Applied rows the user never asked about.
+  // A --status with no value is a usage error (the hasFlag + flagValue
+  // pairing lib/cli-flags.mjs documents for this).
+  const statusGiven = hasFlag(args, '--status');
+  const statusValue = statusGiven ? flagValue(args, '--status') : undefined;
+  if (statusGiven && (typeof statusValue !== 'string' || !statusValue.trim() || statusValue.startsWith('--'))) {
+    console.error('--status needs a value, e.g. --status=Evaluated,Applied');
+    process.exitCode = 1;
+    return;
+  }
+  // The space form's value is an argv token of its own; it is not a URL.
+  const statusTokens = new Set(args.filter((a, i) => a.startsWith('--status=') || a === '--status' || (args[i - 1] === '--status' && a === statusValue)));
   const fromTracker = args.includes('--tracker');
   const discardExpired = args.includes('--discard-expired');
   const applyDiscards = args.includes('--apply');
   const positional = args.filter((a) => a !== '--no-fallback' && a !== '--no-record' && a !== throttleArg
-    && a !== '--tracker' && a !== '--discard-expired' && a !== '--apply' && a !== statusArg);
+    && a !== '--tracker' && a !== '--discard-expired' && a !== '--apply' && !statusTokens.has(a));
 
   if (discardExpired && !fromTracker) {
     console.error('--discard-expired requires --tracker.');
@@ -209,7 +224,7 @@ async function main() {
       return;
     }
     trackerText = readFileSync(trackerPath, 'utf-8');
-    const statuses = statusArg ? statusArg.slice('--status='.length).split(',') : DEFAULT_TRACKER_STATUSES;
+    const statuses = statusGiven ? statusValue.split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_TRACKER_STATUSES;
     const { targets, noUrl } = trackerLivenessTargets(trackerText, { statuses, reportsRoot });
     console.log(`Tracker rows with status ${statuses.join(' or ')}: ${targets.length} with a posting URL${noUrl.length ? `, ${noUrl.length} without (${noUrl.map((n) => `#${n}`).join(' ')})` : ''}`);
     for (const t of targets) labels.set(t.url, `#${t.num} ${t.company} · ${t.role} (${t.status})`);
@@ -315,7 +330,16 @@ async function main() {
   }
 
   if (discardExpired) {
-    const expiredUrls = verdicts.filter((v) => v.result === 'expired').map((v) => v.url);
+    // Only closure EVIDENCE closes a row. An `insufficient_content` verdict
+    // means the page could not be read, whether it arrives as `uncertain` or,
+    // from an older verdict, as `expired`, and this path writes Discarded to
+    // the tracker — see isClosureEvidence().
+    const { closed: expiredUrls, unreadable } = discardableExpiredUrls(verdicts);
+    if (unreadable.length > 0) {
+      console.log(`\nDiscard expired: ${unreadable.length} page(s) could not be read and were left as they are `
+        + '(an unreadable page is unconfirmed, not closed):');
+      for (const url of unreadable) console.log(`  · ${url}`);
+    }
     const planned = planExpiredDiscards(trackerText, expiredUrls, {
       statuses: DEFAULT_DISCARD_STATUSES,
       reportsRoot,

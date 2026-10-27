@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, cpSync 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
-import { requestedLabels, companyOfNotes, matchesCompany, idsForCompanies } from '../batch/company-scope.mjs';
+import { requestedLabels, companyOfNotes, companyOfUrl, matchesCompany, idsForCompanies } from '../batch/company-scope.mjs';
 import { normalizeCompany } from '../tracker-utils.mjs';
 
 console.log('\nbatch/company-scope.mjs — --company scope');
@@ -33,6 +33,16 @@ eq('several names, file order kept', idsForCompanies(TSV, 'initech, globex'), ['
 eq('no match gives no ids', idsForCompanies(TSV, 'nonesuch'), []);
 eq('matchesCompany with no wanted names accepts everything', matchesCompany({ url: 'u', notes: 'n' }, []), true);
 
+// A shared ATS host names the platform, not the employer (follow-up to #5526).
+eq('a shared ATS domain is left out of the URL text', companyOfUrl('https://acme.wd5.myworkdayjobs.com/External/job/1'), 'acme.wd5 /External/job/1 ');
+eq('a URL off any known ATS is used whole', companyOfUrl('https://jobs.example.com/globex-42'), 'https://jobs.example.com/globex-42');
+eq('a value that is not a URL is used whole', companyOfUrl('not a url'), 'not a url');
+eq('"Lever" does not pick every posting hosted on jobs.lever.co', idsForCompanies(TSV, 'Lever'), []);
+eq('"Greenhouse" does not pick every posting hosted on boards.greenhouse.io', idsForCompanies(TSV, 'greenhouse'), []);
+const WORKDAY = 'id\turl\tsource\tnotes\n1\thttps://acme.wd5.myworkdayjobs.com/External/job/1\tWorkday\t\n2\thttps://globex.wd1.myworkdayjobs.com/Careers/job/2\tWorkday\t\n';
+eq('multi-tenant Workday: the tenant subdomain still matches', idsForCompanies(WORKDAY, 'globex'), ['2']);
+eq('multi-tenant Workday: "Workday" matches no tenant', idsForCompanies(WORKDAY, 'workday'), []);
+
 const bad = spawnSync(NODE, ['batch/company-scope.mjs', '--input', 'x.tsv', '--company', ' , '], { cwd: ROOT, encoding: 'utf-8' });
 if (bad.status === 1 && /no usable name/.test(bad.stderr)) pass('CLI rejects a company list with no usable name');
 else fail(`CLI accepted an empty company list: status=${bad.status}`);
@@ -49,8 +59,9 @@ if (!bash) {
     for (const f of ['batch-runner.sh', 'company-scope.mjs', 'batch-prompt.md']) cpSync(join(ROOT, 'batch', f), join(batch, f));
     chmodSync(join(batch, 'batch-runner.sh'), 0o755);
     for (const d of ['lib']) cpSync(join(ROOT, d), join(work, d), { recursive: true });
-    // company-scope.mjs imports normalizeCompany from tracker-utils.mjs (and its siblings).
-    for (const f of ['tracker-utils.mjs', 'tracker-parse.mjs', 'tracker-aliases.json', 'path-resolver.mjs', 'package.json']) cpSync(join(ROOT, f), join(work, f));
+    // company-scope.mjs imports normalizeCompany from tracker-utils.mjs (and its siblings)
+    // and the shared ATS host table from ats-vendor.mjs.
+    for (const f of ['tracker-utils.mjs', 'tracker-parse.mjs', 'tracker-aliases.json', 'path-resolver.mjs', 'ats-vendor.mjs', 'package.json']) cpSync(join(ROOT, f), join(work, f));
     const linkProblem = linkNodeModules(work);
     if (linkProblem) throw new Error(linkProblem);
     writeFileSync(join(batch, 'batch-input.tsv'), TSV);
@@ -83,6 +94,9 @@ if (!bash) {
     const swallowed = run('--company', '--limit', '5');
     if (swallowed.code !== 0 && /--company requires an argument/.test(swallowed.out)) pass('--company followed by another flag is rejected, not read as a company name');
     else fail('"--company --limit 5" took --limit as the company: ' + swallowed.out.slice(0, 200));
+    const dashed = run('--company', '-h');
+    if (dashed.code !== 0 && /--company requires an argument/.test(dashed.out)) pass('--company followed by a single-dash option is rejected, not read as a company name');
+    else fail('"--company -h" took -h as the company: ' + dashed.out.slice(0, 200));
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* best effort */ }
   }

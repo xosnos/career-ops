@@ -37,6 +37,8 @@ import { fail, makeUpdaterRepo, pass, rmSync } from './helpers.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const updaterSource = readFileSync(join(ROOT, 'update-system.mjs'), 'utf8');
+// The updater reads its system-layer list from here (#5554); rollback refuses without it.
+const manifestSource = readFileSync(join(ROOT, 'lib', 'update-manifest.mjs'), 'utf8');
 
 function check(condition, passMessage, failMessage) {
   if (condition) pass(passMessage);
@@ -247,6 +249,8 @@ function seedRepo(prefix) {
   const fixture = makeUpdaterRepo({ prefix });
   const { dir, g } = fixture;
   writeFileSync(join(dir, 'update-system.mjs'), updaterSource);
+  mkdirSync(join(dir, 'lib'), { recursive: true });
+  writeFileSync(join(dir, 'lib', 'update-manifest.mjs'), manifestSource);
   writeFileSync(join(dir, 'package.json'), BACKUP_PACKAGE);
   g('add', '-A');
   g('commit', '-qm', 'backup state');

@@ -196,11 +196,9 @@ export function companyKey(row) {
 // that card would be titled with the normalized key — "joinupch" rather than
 // "joinup.ch". Map.has() is identical to Set.has() on the matching path.
 // BOTH collections, not just tracked_companies. A multi-employer board is far
-// likelier to live under `job_boards` — that is what the section is for — and
-// the two entries this template ships the flag on (Founderful, joinup.ch) are
-// both there. Reading only one collection made the shipped default load ZERO
-// aggregators while looking configured, which is the worst version of this: a
-// flag the user can see in their own config and that silently does nothing.
+// likelier to live under `job_boards` — that is what the section is for — so
+// reading only one collection would leave a flag the user can see in their own
+// config silently doing nothing.
 export function loadAggregatorCompanies(portalsPath = PORTALS_PATH) {
   const found = new Map();
   try {
