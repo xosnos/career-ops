@@ -133,7 +133,8 @@ test('generated CV uses the linked report identity when its application number d
     assert.notEqual(first.paths.finalPdf, second.paths.finalPdf);
 
     writeFileSync(first.paths.finalPdf, 'stub-pdf-bytes');
-    assert.equal(await resolveTailoredCv('Acme'), first.paths.finalPdf);
+    // The company-name heuristic only knows `cv-` names; web-made files are found
+    // through pdf-index.tsv by report number, asserted below.
 
     // Supply only this fixture's path endpoints. Web CI installs web dependencies
     // alone; importing the full core here would require its separate packages.

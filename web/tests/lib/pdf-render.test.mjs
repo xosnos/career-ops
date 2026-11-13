@@ -1138,3 +1138,24 @@ test("failureReason: no failure marker -> whole stderr; empty -> generic message
   assert.equal(failureReason("boom"), "boom");
   assert.equal(failureReason(""), "PDF rendering failed.");
 });
+test("split layout: scripts come from coreRoot, CAREER_OPS_ROOT is dataRoot", async () => {
+  // Given a data root that holds no .mjs files and a separate code checkout
+  const dataRoot = makeScratchDir();
+  const calls = [];
+  const spawnFn = (execPath, args, opts) => { calls.push({ args, opts }); return fakeChild({ exitCode: 0, stdout: "{}" }); };
+  try {
+    // When rendering and marking with distinct roots
+    await spawnGeneratePdf({ spawnFn, execPath: "node", coreRoot: "/code", dataRoot, html: "x.html", finalPdf: "x.pdf", format: "a4", reportNum: "1" });
+    await markTrackerReady({ spawnFn, execPath: "node", coreRoot: "/code", dataRoot, reportNum: "1" });
+
+    // Then each script is resolved in the code root, and receives CAREER_OPS_ROOT for the data root
+    assert.equal(calls[0].args[0], join("/code", "generate-pdf.mjs"));
+    assert.equal(calls[1].args[0], join("/code", "mark-pdf-ready.mjs"));
+    for (const c of calls) {
+      assert.equal(c.opts.cwd, "/code");
+      assert.equal(c.opts.env.CAREER_OPS_ROOT, dataRoot);
+    }
+  } finally {
+    rmSync(dataRoot, { recursive: true, force: true });
+  }
+});

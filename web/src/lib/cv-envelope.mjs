@@ -225,6 +225,19 @@ function completeMarker(re, s) {
  *   held at end of stream, `result` parses everything pushed so far.
  */
 export function createCvEnvelopeFilter() {
+  return createEnvelopeFilter({ opener: OPENER, closerAll: CLOSER_ALL, openMark: OPEN_MARK, closeMark: CLOSE_MARK, parse: parseCvEnvelope });
+}
+
+/**
+ * The streaming filter behind createCvEnvelopeFilter, parameterized by marker
+ * so the LaTeX patches envelope (cv-patches-envelope.mjs) gets the same
+ * cross-chunk marker handling instead of a second copy of it.
+ *
+ * @param {{opener: RegExp, closerAll: RegExp, openMark: string, closeMark: string, parse: (raw: string) => any}} cfg
+ */
+export function createEnvelopeFilter({ opener: OPENER, closerAll: CLOSER_ALL, openMark: OPEN_MARK, closeMark: CLOSE_MARK, parse }) {
+  const couldBecomeMarker = (line) =>
+    OPEN_MARK.startsWith(line) || CLOSE_MARK.startsWith(line) || line.startsWith(OPEN_MARK) || line.startsWith(CLOSE_MARK);
   let raw = "";       // everything pushed, verbatim — what result() parses
   let pending = "";   // display work buffer (CRLF-normalized so lines match)
   let carry = "";     // a trailing "\r" whose "\n" may be in the next chunk
@@ -286,7 +299,7 @@ export function createCvEnvelopeFilter() {
     },
 
     result() {
-      return parseCvEnvelope(raw);
+      return parse(raw);
     },
   };
 }

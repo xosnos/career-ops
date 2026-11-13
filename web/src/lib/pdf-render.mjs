@@ -431,3 +431,116 @@ export async function renderAndMarkPdf({ spawnFn, execPath, coreRoot, pdfPaths, 
 
   return { kind: "rendered", warnings };
 }
+
+
+/**
+ * Run one engine script to completion and capture its output. Same roots as the
+ * other spawn helpers: the script comes from `coreRoot`, the child runs in `dataRoot`.
+ * @param {{spawnFn: Function, execPath: string, dataRoot: string, coreRoot?: string, script: string, args: string[]}} args
+ * @returns {Promise<{ok: boolean, stdout: string, stderr: string}>}
+ */
+function runScript({ spawnFn, execPath, dataRoot, coreRoot = dataRoot, script, args }) {
+  return new Promise((resolve) => {
+    const env = dataRoot ? { ...process.env, CAREER_OPS_ROOT: dataRoot } : process.env;
+    const child = spawnFn(execPath, [path.join(coreRoot, script), ...args], { cwd: dataRoot, env, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d) => { stdout += d.toString(); });
+    child.stderr?.on("data", (d) => { stderr += d.toString(); });
+    child.on("close", (code) => resolve({ ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() }));
+    child.on("error", (e) => resolve({ ok: false, stdout: "", stderr: `${script} failed to start: ${e.message}` }));
+  });
+}
+
+/**
+ * Record a LaTeX-built CV in data/pdf-index.tsv the way generate-pdf.mjs does
+ * for HTML ones (report, pdf, source, format, date, kind), so "View tailored CV"
+ * and Apply find it by report number. A report's earlier CV row is superseded.
+ * Best effort: the PDF already exists, so a failure is a warning, not a failed run.
+ * @param {{indexPath: string, root: string, reportNum: string, pdf: string, tex: string, format: string, today: string}} args
+ * @returns {void}
+ */
+export function recordLatexPdf({ indexPath, root, reportNum, pdf, tex, format, today }) {
+  const rel = (p) => path.relative(root, p).split(path.sep).join("/");
+  const num = String(Number(reportNum));
+  const lines = fs.existsSync(indexPath) ? fs.readFileSync(indexPath, "utf8").split("\n") : [];
+  const kept = lines.filter((line) => {
+    if (!line.trim()) return false;
+    if (line.startsWith("#")) return true;
+    const [r, , , , , kind] = line.split("\t");
+    // Cover letters share the report number; only a stale CV row is superseded.
+    return !(String(Number(r)) === num && (kind === undefined || kind === "" || kind === "cv"));
+  });
+  kept.push([reportNum, rel(pdf), rel(tex), format, today, "cv"].join("\t"));
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  const tmp = `${indexPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, kept.join("\n").replace(/\n*$/, "\n"), "utf8");
+  fs.renameSync(tmp, indexPath);
+}
+
+/**
+ * Build the tailored CV from the user's own .tex (modes/latex-tex.md): apply the
+ * agent's slot patches, compile through generate-latex.mjs (which runs the CV fact
+ * gate against cv.md plus the source .tex), then record the index row and mark
+ * the tracker, only after a CONFIRMED compile.
+ *
+ * @param {{spawnFn: Function, execPath: string, dataRoot?: string, root?: string, coreRoot?: string, codeRoot?: string, sourceTex: string, slots: object[], patches: {id: string, text: string}[], pdfPaths: {html: string, finalPdf: string}, indexPath?: string | null, today: string, reportNum: string}} args
+ * @returns {Promise<RenderResult>}
+ */
+export async function renderLatexAndMarkPdf({ spawnFn, execPath, root, dataRoot = root, codeRoot, coreRoot = codeRoot ?? dataRoot, sourceTex, slots, patches, pdfPaths, indexPath, today, reportNum }) {
+  const warnings = [];
+  const scratchDir = path.dirname(pdfPaths.html);
+  const patchesFile = path.join(scratchDir, `cv-web-${reportNum}.patches.json`);
+  const texPath = pdfPaths.finalPdf.replace(/\.pdf$/i, ".tex");
+  const fail = (error) => {
+    cleanupPdfScratch(scratchDir, `cv-web-${reportNum}.`);
+    return { kind: "render-failed", error };
+  };
+
+  try {
+    fs.writeFileSync(patchesFile, JSON.stringify({ slots, patches }), "utf8");
+  } catch (err) {
+    return fail(`Could not save the tailored slots: ${err.message}`);
+  }
+
+  const patched = await runScript({ spawnFn, execPath, dataRoot, coreRoot, script: "patch-latex-content.mjs", args: [sourceTex, patchesFile, texPath] });
+  if (!patched.ok) return fail(patched.stderr || "Applying the tailored text to your .tex failed.");
+
+  const built = await runScript({
+    spawnFn, execPath, dataRoot, coreRoot,
+    script: "generate-latex.mjs",
+    args: [texPath, pdfPaths.finalPdf, "--compile-only", "--source", sourceTex],
+  });
+  let report = null;
+  try { report = JSON.parse(built.stdout); } catch { /* not JSON: fall back to stderr */ }
+  if (!built.ok || report?.compiled !== true) {
+    if (report?.factCheck?.verdict === "block") {
+      // The gate's own reason names the unsupported phrases; without it the user
+      // can only re-run blind. The patched .tex stays in output/ for inspection.
+      const detail = String(report.factCheck.reason ?? "").replace(/^Fact check failed for [^:]+:\s*/, "").replace(/\s*cv\.md and article-digest\.md do not contain.*$/s, "");
+      return fail(`The CV fact check blocked the tailored .tex (not compiled): ${detail || "unsupported claims"}. Re-run, or allow a verified phrase in config/cv-facts.json.`);
+    }
+    return fail(report?.compileError || built.stderr || "LaTeX compilation failed.");
+  }
+  cleanupPdfScratch(scratchDir, `cv-web-${reportNum}.`);
+  for (const line of built.stderr.split("\n")) if (line.trim()) warnings.push(line.trim());
+
+  if (indexPath) {
+    try {
+      recordLatexPdf({ indexPath, root: dataRoot, reportNum, pdf: pdfPaths.finalPdf, tex: texPath, format: "letter", today });
+    } catch (err) {
+      warnings.push(`PDF built, but data/pdf-index.tsv was not updated: ${err.message}`);
+    }
+  }
+
+  const mark = await markTrackerReady({ spawnFn, execPath, coreRoot, dataRoot, reportNum });
+  if (!mark.ok) {
+    console.error(`mark-pdf-ready.mjs failed for report #${reportNum}: ${mark.data?.error ?? mark.stderr}`);
+    warnings.push(
+      mark.data?.error
+        ? `PDF built, but the tracker wasn't updated: ${mark.data.error}`
+        : `PDF built, but the tracker's PDF column wasn't updated automatically — run \`node mark-pdf-ready.mjs ${reportNum}\` manually.`,
+    );
+  }
+  return { kind: "rendered", warnings };
+}

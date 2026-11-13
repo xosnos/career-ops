@@ -115,7 +115,7 @@ test("pdf paths take the candidate slug from the override profile", async () => 
     const report = path.join(root, "reports", "018-acme-2026-07-01.md");
     const result = resolvePdfPaths("018", "2026-07-26", root, () => report);
     assert.equal(result.ok, true);
-    assert.match(path.basename(result.paths.finalPdf), /^cv-beta-person-018-/);
+    assert.match(path.basename(result.paths.finalPdf), /^beta-person-resume-acme-018-/);
   });
 });
 

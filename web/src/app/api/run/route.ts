@@ -10,13 +10,17 @@ import { localISODate } from "@/lib/followups";
 import { accumulateTokens, createAgentTextJoiner, isFatalGenericStderr, killMsForKind, noOutputError, timeoutMessage } from "@/lib/run-cli-support.mjs";
 import { spawnHeadlessCli } from "@/lib/spawn-cli.mjs";
 import { careerOpsRoot, readMemory, findReportFile, readInbox, readScanDates, readLanguageConfig } from "@/lib/career-ops";
-import { resolveCodeRoot } from "@/lib/core/code-root.mjs";
+import { resolveCodeRoot, resolveRootScript } from "@/lib/core/code-root.mjs";
 import { dataFolderMissingMessage, unsafeDataRootMessage } from "@/lib/core/data-root.mjs";
 import { resolvePdfPaths, type PdfPaths } from "@/lib/pdf-paths.mjs";
-import { renderAndMarkPdf, writeCvHtml, pdfRunOutcome } from "@/lib/pdf-render.mjs";
+import { renderAndMarkPdf, renderLatexAndMarkPdf, writeCvHtml, pdfRunOutcome } from "@/lib/pdf-render.mjs";
 import { materializeTailoredCv, withSharedPdfPath } from "@/lib/cv-from-json.mjs";
 import { saveBuiltCv } from "@/lib/pdf-run-save.mjs";
 import { createCvEnvelopeFilter } from "@/lib/cv-envelope.mjs";
+import { createPatchesEnvelopeFilter } from "@/lib/cv-patches-envelope.mjs";
+import { resolveLatexSource } from "@/lib/latex-source.mjs";
+import { resolvePdfIndexPath } from "@/lib/core/pdf-index";
+import { pathToFileURL } from "node:url";
 import { createReportEnvelopeFilter } from "@/lib/report-envelope.mjs";
 import { persistEvaluation, evaluateRunOutcome, evaluationOutcomeEvent } from "@/lib/report-persist.mjs";
 import { buildPrompt, isShellSafeCompanyName } from "@/lib/run-prompts.mjs";
@@ -212,6 +216,29 @@ export async function POST(req: Request) {
   const pageFormat: PageFormatSetting | undefined = dataRoot
     ? await readPageFormatSetting(codeRoot, getProfilePath(dataRoot))
     : undefined;
+  // With cv.output_format: latex and a user-owned .tex, the pdf run tailors that
+  // file's prose slots (modes/latex-tex.md) instead of filling an HTML template.
+  // The slots are extracted HERE because the worker has no shell.
+  const latexSource = dataRoot ? resolveLatexSource(dataRoot) : null;
+  let latexSlots: { id: string; kind: string; text: string }[] | undefined;
+  if (latexSource) {
+    try {
+      const core = await import(/* webpackIgnore: true */ pathToFileURL(resolveRootScript(codeRoot, "lib/latex-content")).href);
+      const manifest = core.buildManifest(path.basename(latexSource), fs.readFileSync(latexSource, "utf8"));
+      if (!manifest.supported) {
+        return new Response(
+          JSON.stringify({ error: `${path.basename(latexSource)} uses a LaTeX layout career-ops can't tailor in place. ${manifest.hint ?? manifest.error ?? ""}`.trim() }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      latexSlots = manifest.slots;
+    } catch (e) {
+      return new Response(
+        JSON.stringify({ error: `Could not read ${path.basename(latexSource)}: ${e instanceof Error ? e.message : String(e)}` }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+  }
   // Hold the tracker guard through evaluation persistence / PDF marking. Build
   // the prompt inside the same try so preparation failures release it too. It is
   // taken before the JD prefetch, so a row delete cannot land in that window.
@@ -243,6 +270,7 @@ export async function POST(req: Request) {
     }
     const prompt = buildPrompt({
       kind,
+      latexSlots,
       input,
       memory: readMemory(),
       today,
@@ -439,7 +467,8 @@ export async function POST(req: Request) {
       // pdf's CV arrives inline in a <<cv-html>> envelope (#2185); evaluate's
       // report arrives in a <<report-md>> envelope. The filter keeps every byte
       // for the backend while holding the body out of the run log.
-      const cvFilter = kind === "pdf" ? createCvEnvelopeFilter() : null;
+      const cvFilter = kind === "pdf" && !latexSource ? createCvEnvelopeFilter() : null;
+      const patchFilter = kind === "pdf" && latexSource ? createPatchesEnvelopeFilter(new Set((latexSlots ?? []).map((s) => s.id))) : null;
       const reportFilter = kind === "evaluate" ? createReportEnvelopeFilter() : null;
       // Assistant-authored text only, before report-body filtering. Tools/JDs
       // cannot directly declare a gated outcome. Process integrity is checked
@@ -455,7 +484,7 @@ export async function POST(req: Request) {
       // ignored by the client's switch, so this is safe for older tabs too.
       const sendAgentText = (text: string) => {
         if (kind === "evaluate") evaluationText += text;
-        const filter = cvFilter ?? reportFilter;
+        const filter = cvFilter ?? patchFilter ?? reportFilter;
         const visible = filter ? filter.push(text) : text;
         if (visible) send({ type: "text", text: visible });
       };
@@ -570,6 +599,34 @@ export async function POST(req: Request) {
           close();
         }
       };
+      const renderLatex = async (paths: PdfPaths, sourceTex: string, patches: { id: string; text: string }[]) => {
+        send({ type: "status", label: "Building LaTeX resume…" });
+        try {
+          const result = await renderLatexAndMarkPdf({
+            spawnFn: spawn,
+            execPath: process.execPath,
+            dataRoot: careerOpsRoot(),
+            coreRoot: resolveCodeRoot(process.cwd(), process.env),
+            sourceTex,
+            slots: latexSlots ?? [],
+            patches,
+            pdfPaths: paths,
+            indexPath: await resolvePdfIndexPath(),
+            today,
+            reportNum: paths.reportNum,
+          });
+          if (result.kind === "render-failed") {
+            send({ type: "error", msg: result.error.slice(0, 500) });
+            return;
+          }
+          sendWarnings(result.warnings);
+          send({ type: "done", tokens: lastTokens, costUsd: lastCostUsd });
+        } catch (e) {
+          send({ type: "error", msg: `LaTeX build crashed unexpectedly: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200) });
+        } finally {
+          close();
+        }
+      };
       const renderPdf = async (paths: PdfPaths, format: "letter" | "a4", ats?: { html: string; finalPdf: string } | null) => {
         send({ type: "status", label: "Rendering PDF…" });
         try {
@@ -639,12 +696,14 @@ export async function POST(req: Request) {
         if (kind === "pdf") {
           // Release any text the filter was still holding, so the log keeps the
           // agent's closing narration and its VERDICT line.
-          const tail = cvFilter?.flush();
+          const tail = (cvFilter ?? patchFilter)?.flush();
           if (tail) send({ type: "text", text: tail });
           // The artifact check moved from the filesystem to the stream (#2185):
           // whether pdfPaths.html exists says nothing now that the backend is its
           // only writer. pdfRunOutcome owns the decision and the message.
-          const envelope = cvFilter?.result();
+          const cvEnvelope = cvFilter?.result();
+          const patchEnvelope = patchFilter?.result();
+          const envelope = patchFilter ? patchEnvelope : cvEnvelope;
           const outcome = pdfRunOutcome({
             envelope,
             noOutputMessage: noOutputMessage(),
@@ -660,8 +719,12 @@ export async function POST(req: Request) {
             // bare close() — a stream that ends with neither error nor done is the
             // one outcome this handler exists to prevent.
             send({ type: "error", msg: "Internal error: the pdf run passed its gate with no CV to save — please report this." });
-          } else {
-            sendWarnings(envelope.warnings);
+          } else if (patchEnvelope?.ok && latexSource) {
+            sendWarnings(patchEnvelope.warnings);
+            pdfRenderPromise = renderLatex(pdfPaths, latexSource, patchEnvelope.patches);
+            return;
+          } else if (cvEnvelope?.ok) {
+            sendWarnings(cvEnvelope.warnings);
             // Tracked so cancel() can defer releasing writeToken until this
             // settles. close() happens once rendering finishes, not here.
             pdfRenderPromise = withSharedPdfPath(pdfPaths.html, async () => {
@@ -673,14 +736,14 @@ export async function POST(req: Request) {
                 // HTML width and the PDF page are the same size.
                 const sheet = await resolveRenderPageFormat(codeRoot, {
                   setting: pageFormat?.setting ?? null,
-                  declared: envelope.format,
-                  country: envelope.country,
+                  declared: cvEnvelope.format,
+                  country: cvEnvelope.country,
                 });
                 sendWarnings(sheet.warnings);
                 await saveBuiltCv({
                   build: async () => {
                     const built = await materializeTailoredCv({
-                      envelope: { ...envelope, format: sheet.format },
+                      envelope: { ...cvEnvelope, format: sheet.format },
                       coreRoot: resolveCodeRoot(process.cwd(), process.env),
                       dataRoot: careerOpsRoot(),
                       cvTemplate,

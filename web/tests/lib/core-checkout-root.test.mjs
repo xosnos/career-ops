@@ -40,7 +40,7 @@ test("careerOpsRoot derives the data root from the same checkout base", () => {
 const SYSTEM_PATH_ON_DATA_ROOT = [
   /(?:careerOpsRoot\(\)|\broot)\s*,\s*"[^"]+\.mjs"/,
   /(?:careerOpsRoot\(\)|\broot)\s*,\s*"(?:templates|lib)"/,
-  /(?:careerOpsRoot\(\)|\broot)\s*,\s*"modes"\s*,\s*"(?!_profile\.md")/,
+  /(?:careerOpsRoot\(\)|\broot)\s*,\s*"modes"\s*,\s*"(?!_profile\.md"|_custom\.md")/,
   /(?:careerOpsRoot\(\)|\broot)\s*,\s*"config"\s*,\s*"profile\.example\.yml"/,
 ];
 

@@ -21,11 +21,36 @@ export function slugify(s) {
 }
 
 /**
+ * Read the resume filename template from the user's modes/_custom.md, e.g.
+ * `steven-nguyen-resume-{company-slug}-{role-slug}-{YYYY-MM-DD}.{ext}`. Only a
+ * backticked line containing {company-slug} and ending in .{ext} counts, and only
+ * the four known tokens are allowed: anything else returns null so the caller
+ * falls back to the built-in name instead of writing a stray literal.
+ * @param {string} root - Data root.
+ * @returns {string | null}
+ */
+export function readResumeNameTemplate(root) {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(root, "modes", "_custom.md"), "utf8");
+  } catch {
+    return null;
+  }
+  for (const m of text.matchAll(/`([^`\n]*\{company-slug\}[^`\n]*\.\{ext\})`/g)) {
+    const tokens = m[1].match(/\{[^}]*\}/g) ?? [];
+    if (!tokens.every((t) => ["{company-slug}", "{role-slug}", "{YYYY-MM-DD}", "{ext}"].includes(t))) continue;
+    if (!/^[a-z0-9.{}-]+$/i.test(m[1])) continue;
+    return m[1];
+  }
+  return null;
+}
+
+/**
  * @typedef {Object} PdfPaths
  * @property {string} reportNum - Canonical report number, used for filenames and the PDF manifest.
  * @property {string} reportFile - Resolved report path relative to the data root, used by the tailoring prompt.
  * @property {string} html - Where the backend writes the tailored HTML it parsed out of the agent's envelope (#2185).
- * @property {string} finalPdf - Where the backend renders the final PDF (output/cv-{candidate}-{report}-{company}-{date}.pdf).
+ * @property {string} finalPdf - Where the backend renders the final PDF (output/{candidate}-resume-{company}-{role}-{date}.pdf, the naming rule in modes/_custom.md when it has one; the report number stands in for an unreadable role).
  */
 
 /**
@@ -68,7 +93,19 @@ export function resolvePdfPaths(input, today, root, findReportFile) {
     .replace(/^0+(?=\d)/, "")
     .padStart(3, "0");
   const companyMatch = reportName.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/);
-  const companySlug = companyMatch ? companyMatch[1] : "company";
+  // The report filename slug is "{company}-{role}" with no boundary between
+  // them, so read both from the report's "# NNN — Company — Role" heading.
+  // Unreadable or unparseable: the whole filename slug stands in for the company.
+  let companySlug = companyMatch ? companyMatch[1] : "company";
+  let roleSlug = "";
+  try {
+    const h1 = fs.readFileSync(reportFile, "utf8").split("\n", 1)[0];
+    const m = h1.match(/^#\s+\d+\s+[—–-]\s+(.+?)\s+[—–]\s+(.+?)\s*$/);
+    if (m && slugify(m[1])) {
+      companySlug = slugify(m[1]);
+      roleSlug = slugify(m[2]);
+    }
+  } catch { /* unreadable report: keep the filename slug */ }
   let candidateSlug = "candidate";
   try {
     // js-yaml v4's load() uses the safe default schema (no arbitrary type
@@ -85,6 +122,13 @@ export function resolvePdfPaths(input, today, root, findReportFile) {
       console.warn(`resolvePdfPaths: could not read/parse config/profile.yml, defaulting candidate slug: ${err.message}`);
     }
   }
+  // The user's own naming rule wins; the report number stands in for a role we
+  // could not read so two roles at one company never share a name.
+  const role = roleSlug || reportNum;
+  const template = readResumeNameTemplate(root);
+  const pdfName = template
+    ? template.replace("{company-slug}", companySlug).replace("{role-slug}", role).replace("{YYYY-MM-DD}", today).replace("{ext}", "pdf")
+    : `${candidateSlug}-resume-${companySlug}-${role}-${today}.pdf`;
   const scratchDir = path.join(root, ".career-ops-web", "pdf-tmp");
   fs.mkdirSync(scratchDir, { recursive: true });
   return {
@@ -93,7 +137,7 @@ export function resolvePdfPaths(input, today, root, findReportFile) {
       reportNum,
       reportFile: path.relative(root, reportFile).split(path.sep).join("/"),
       html: path.join(scratchDir, `cv-web-${reportNum}.html`),
-      finalPdf: path.join(root, "output", `cv-${candidateSlug}-${reportNum}-${companySlug}-${today}.pdf`),
+      finalPdf: path.join(root, "output", pdfName),
     },
   };
 }
