@@ -27,6 +27,7 @@ type Catalog struct {
 	TabSkip       string
 	TabRejected   string
 	TabDiscarded  string
+	TabOther      string
 
 	// Table column headers
 	ColFit      string
@@ -111,6 +112,7 @@ type Catalog struct {
 	StatusDiscarded  string
 	StatusSkip       string
 	StatusHired      string
+	StatusOther      string
 
 	// Additional UI strings
 	NoData        string
@@ -128,6 +130,7 @@ type Catalog struct {
 	HelpReport     string
 	HelpOpenURL    string
 	HelpOpenPDF    string
+	HelpCopyPDF    string
 	HelpRegenPDF   string
 	HelpChange     string
 	HelpColumns    string
@@ -135,6 +138,7 @@ type Catalog struct {
 	HelpProgress   string
 	HelpStats      string
 	HelpQuit       string
+	HelpKeys       string
 	HelpScroll     string
 	HelpPage       string
 	HelpTopEnd     string
@@ -173,6 +177,24 @@ type Catalog struct {
 	SortPosted   string
 	ViewGrouped  string
 	ViewFlat     string
+
+	// Inbox tab (#5269): the Pending rows of data/pipeline.md, read only
+	TabInbox               string
+	ColRank                string
+	SortRank               string
+	LabelRank              string
+	LabelURL               string
+	InboxEmpty             string
+	InboxNotRanked         string
+	InboxSummary           string
+	InboxNoWebURL          string
+	InboxUnavailable       string
+	InboxStatusQueued      string
+	InboxStatusRunning     string
+	InboxStatusPaused      string
+	InboxStatusNeedsAnswer string
+	InboxStatusFailed      string
+	InboxStatusDone        string
 }
 
 // SortModeLabel returns the localized display label for a sort mode ("score", "date", etc.).
@@ -236,6 +258,8 @@ func (c *Catalog) StatusLabel(norm string) string {
 		return c.StatusRejected
 	case "discarded":
 		return c.StatusDiscarded
+	case "other":
+		return c.StatusOther
 	default:
 		return norm
 	}
@@ -326,6 +350,7 @@ var En = Catalog{
 	TabSkip:       "SKIP",
 	TabRejected:   "REJECTED",
 	TabDiscarded:  "DISCARDED",
+	TabOther:      "OTHER",
 
 	// Table column headers
 	ColFit:      "FIT",
@@ -410,6 +435,7 @@ var En = Catalog{
 	StatusDiscarded:  "Discarded",
 	StatusSkip:       "SKIP",
 	StatusHired:      "Hired",
+	StatusOther:      "Other",
 
 	// Additional UI strings
 	NoData:        "No data",
@@ -427,6 +453,7 @@ var En = Catalog{
 	HelpReport:     " report  ",
 	HelpOpenURL:    " open URL  ",
 	HelpOpenPDF:    " open PDF  ",
+	HelpCopyPDF:    " copy PDF path  ",
 	HelpRegenPDF:   " regen PDF  ",
 	HelpChange:     " change  ",
 	HelpColumns:    " columns  ",
@@ -434,6 +461,7 @@ var En = Catalog{
 	HelpProgress:   " progress  ",
 	HelpStats:      " stats  ",
 	HelpQuit:       " quit",
+	HelpKeys:       " keys  ",
 	HelpScroll:     " scroll  ",
 	HelpPage:       " page  ",
 	HelpTopEnd:     " top/end  ",
@@ -472,6 +500,24 @@ var En = Catalog{
 	SortPosted:   "posted",
 	ViewGrouped:  "grouped",
 	ViewFlat:     "flat",
+
+	// Inbox tab
+	TabInbox:               "INBOX",
+	ColRank:                "RANK",
+	SortRank:               "rank",
+	LabelRank:              "Rank: ",
+	LabelURL:               "URL: ",
+	InboxEmpty:             "No pending rows in data/pipeline.md",
+	InboxNotRanked:         "not ranked",
+	InboxSummary:           "%d pending · %d not ranked",
+	InboxNoWebURL:          "Not a web address, nothing opened: %s",
+	InboxUnavailable:       "Inbox unavailable; showing previous rows: %s",
+	InboxStatusQueued:      "Queued",
+	InboxStatusRunning:     "Running",
+	InboxStatusPaused:      "Paused",
+	InboxStatusNeedsAnswer: "Needs answer",
+	InboxStatusFailed:      "Failed",
+	InboxStatusDone:        "Done",
 }
 
 // Tr is the static Turkish translation catalog.
@@ -493,6 +539,7 @@ var Tr = Catalog{
 	TabSkip:       "UYGUN DEĞİL",
 	TabRejected:   "REDDEDİLDİ",
 	TabDiscarded:  "İPTAL",
+	TabOther:      "DİĞER",
 
 	// Table column headers
 	ColFit:      "UYUM",
@@ -577,6 +624,7 @@ var Tr = Catalog{
 	StatusDiscarded:  "İptal Edildi",
 	StatusSkip:       "Uygun Değil",
 	StatusHired:      "İşe Alındı",
+	StatusOther:      "Diğer",
 
 	// Additional UI strings
 	NoData:        "Veri yok",
@@ -594,6 +642,7 @@ var Tr = Catalog{
 	HelpReport:     " rapor  ",
 	HelpOpenURL:    " URL aç  ",
 	HelpOpenPDF:    " PDF'i aç  ",
+	HelpCopyPDF:    " PDF yolunu kopyala  ",
 	HelpRegenPDF:   " PDF üret  ",
 	HelpChange:     " durum  ",
 	HelpColumns:    " sütunlar  ",
@@ -601,6 +650,7 @@ var Tr = Catalog{
 	HelpProgress:   " ilerleme  ",
 	HelpStats:      " istatistik  ",
 	HelpQuit:       " çıkış",
+	HelpKeys:       " tuşlar  ",
 	HelpScroll:     " kaydır  ",
 	HelpPage:       " sayfa  ",
 	HelpTopEnd:     " baş/son  ",
@@ -639,6 +689,24 @@ var Tr = Catalog{
 	SortPosted:   "yayın",
 	ViewGrouped:  "gruplu",
 	ViewFlat:     "düz",
+
+	// Inbox tab
+	TabInbox:               "GELEN",
+	ColRank:                "SIRA",
+	SortRank:               "sıra",
+	LabelRank:              "Sıra: ",
+	LabelURL:               "URL: ",
+	InboxEmpty:             "data/pipeline.md içinde bekleyen satır yok",
+	InboxNotRanked:         "sıralanmadı",
+	InboxSummary:           "%d bekleyen · %d sıralanmadı",
+	InboxNoWebURL:          "Web adresi değil, hiçbir şey açılmadı: %s",
+	InboxUnavailable:       "Gelen kutusu okunamadı; önceki satırlar gösteriliyor: %s",
+	InboxStatusQueued:      "Sırada",
+	InboxStatusRunning:     "Çalışıyor",
+	InboxStatusPaused:      "Duraklatıldı",
+	InboxStatusNeedsAnswer: "Yanıt bekliyor",
+	InboxStatusFailed:      "Başarısız",
+	InboxStatusDone:        "Tamamlandı",
 }
 
 // Es is the static Spanish translation catalog.
@@ -660,6 +728,7 @@ var Es = Catalog{
 	TabSkip:       "OMITIR",
 	TabRejected:   "RECHAZADAS",
 	TabDiscarded:  "DESCARTADAS",
+	TabOther:      "OTRAS",
 
 	// Table column headers
 	ColFit:      "AJUSTE",
@@ -744,6 +813,7 @@ var Es = Catalog{
 	StatusDiscarded:  "Descartada",
 	StatusSkip:       "OMITIR",
 	StatusHired:      "Contratada",
+	StatusOther:      "Otras",
 
 	// Additional UI strings
 	NoData:        "Sin datos",
@@ -761,6 +831,7 @@ var Es = Catalog{
 	HelpReport:     " informe  ",
 	HelpOpenURL:    " abrir URL  ",
 	HelpOpenPDF:    " abrir PDF  ",
+	HelpCopyPDF:    " copiar ruta del PDF  ",
 	HelpRegenPDF:   " regenerar PDF  ",
 	HelpChange:     " cambiar  ",
 	HelpColumns:    " columnas  ",
@@ -768,6 +839,7 @@ var Es = Catalog{
 	HelpProgress:   " progreso  ",
 	HelpStats:      " estadísticas  ",
 	HelpQuit:       " salir",
+	HelpKeys:       " teclas  ",
 	HelpScroll:     " desplazar  ",
 	HelpPage:       " página  ",
 	HelpTopEnd:     " inicio/fin  ",
@@ -806,6 +878,24 @@ var Es = Catalog{
 	SortPosted:   "publicado",
 	ViewGrouped:  "agrupado",
 	ViewFlat:     "plano",
+
+	// Inbox tab
+	TabInbox:               "BANDEJA",
+	ColRank:                "RANGO",
+	SortRank:               "rango",
+	LabelRank:              "Rango: ",
+	LabelURL:               "URL: ",
+	InboxEmpty:             "No hay filas pendientes en data/pipeline.md",
+	InboxNotRanked:         "sin rango",
+	InboxSummary:           "%d pendientes · %d sin rango",
+	InboxNoWebURL:          "No es una dirección web; no se abrió nada: %s",
+	InboxUnavailable:       "Bandeja no disponible; se muestran las filas anteriores: %s",
+	InboxStatusQueued:      "En cola",
+	InboxStatusRunning:     "En curso",
+	InboxStatusPaused:      "En pausa",
+	InboxStatusNeedsAnswer: "Falta respuesta",
+	InboxStatusFailed:      "Fallida",
+	InboxStatusDone:        "Hecha",
 }
 
 // Current points to the active language catalog. Defaults to English (&En).
